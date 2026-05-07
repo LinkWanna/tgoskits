@@ -141,6 +141,11 @@ impl CowBackend {
             file.read_at(&mut &mut buf[start..start + max_read], file_read_offset)?;
         }
         pt.map(vaddr, frame, self.size, flags)?;
+
+        unsafe {
+            core::arch::asm!("sfence.vma");
+            core::arch::asm!("fence.i");
+        }
         Ok(())
     }
 
