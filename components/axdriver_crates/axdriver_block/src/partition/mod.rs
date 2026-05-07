@@ -1,5 +1,6 @@
 mod device;
 mod gpt;
+mod mbr;
 
 use alloc::{string::String, vec::Vec};
 
@@ -57,7 +58,13 @@ impl PartitionTable {
 }
 
 pub fn scan_partitions<T: BlockDriverOps + ?Sized>(inner: &mut T) -> DevResult<PartitionTable> {
+    // Try GPT first
     if let Some(table) = gpt::scan_gpt_partitions(inner)? {
+        return Ok(table);
+    }
+
+    // If GPT is not found, try MBR
+    if let Some(table) = mbr::scan_mbr_partitions(inner)? {
         return Ok(table);
     }
 
