@@ -61,7 +61,6 @@ unsafe extern "C" fn _start() -> ! {
         add     sp, sp, s2
 
         mv      a0, s0
-        addi    a0, a0, -1
         mv      a1, s1
         la      a2, {entry}
         add     a2, a2, s2
