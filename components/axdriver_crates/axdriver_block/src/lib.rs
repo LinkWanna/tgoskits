@@ -22,6 +22,9 @@ pub mod partition;
 #[cfg(feature = "sdmmc")]
 pub mod sdmmc;
 
+#[cfg(feature = "cv181xsd")]
+pub mod cv181xsd;
+
 #[doc(no_inline)]
 pub use ax_driver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 

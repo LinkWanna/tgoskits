@@ -791,6 +791,7 @@ dependencies = [
  "bcm2835-sdhci",
  "gpt_disk_io",
  "log",
+ "sg200x-bsp",
  "simple-ahci",
  "simple-sdmmc",
 ]
@@ -2139,6 +2140,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0700ddab506f33b20a03b13996eccd309a48e5ff77d0d95926aa0210fb4e95f1"
 dependencies = [
  "bit-vec",
+]
+
+[[package]]
+name = "bit-struct"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "270fbbb014407467f7a2c9b1fa0b74057d5cbc452f18bac3bb5aad601e590521"
+dependencies = [
+ "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -7755,6 +7766,15 @@ dependencies = [
  "scopeguard",
  "unescaper",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "sg200x-bsp"
+version = "0.5.4"
+dependencies = [
+ "bit-struct",
+ "log",
+ "tock-registers 0.9.0",
 ]
 
 [[package]]

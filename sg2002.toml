@@ -1,11 +1,10 @@
+target = "riscv64gc-unknown-none-elf"
 env = {}
 features = [
-    "ax-feat/myplat",
     "sg2002",
+    "ax-feat/myplat",
     "ax-feat/bus-mmio",
-    # "ax-feat/driver-cv181xsd",
-    "ax-feat/driver-ramdisk",
+    "ax-feat/driver-cv181xsd",
 ]
 log = "Warn"
-plat_dyn = false
-target = "riscv64gc-unknown-none-elf"
+plat_dyn = true

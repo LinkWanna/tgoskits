@@ -96,6 +96,25 @@ cfg_if::cfg_if! {
 }
 
 cfg_if::cfg_if! {
+    if #[cfg(block_dev = "cv181xsd")] {
+        pub struct Cv181xSDDriver;
+        register_block_driver!(Cv181xSDDriver, ax_driver_block::cv181xsd::Cv181xSD);
+
+        impl DriverProbe for Cv181xSDDriver {
+            fn probe_global() -> Option<AxDeviceEnum> {
+                let sdmmc = unsafe {
+                    ax_driver_block::cv181xsd::Cv181xSD::new(
+                        ax_hal::mem::phys_to_virt(ax_config::devices::SDMMC_PADDR.into()).into(),
+                        ax_hal::mem::phys_to_virt(ax_config::devices::TOP_PADDR.into()).into(),
+                    )
+                };
+                Some(AxDeviceEnum::from_block(sdmmc))
+            }
+        }
+    }
+}
+
+cfg_if::cfg_if! {
     if #[cfg(block_dev = "bcm2835-sdhci")]{
         pub struct BcmSdhciDriver;
         register_block_driver!(BcmSdhciDriver, ax_driver_block::bcm2835sdhci::SDHCIDriver);
