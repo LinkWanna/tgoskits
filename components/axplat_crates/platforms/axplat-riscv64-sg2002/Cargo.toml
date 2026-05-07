@@ -1,0 +1,32 @@
+[package]
+name = "axplat-riscv64-sg2002"
+version = "0.5.7"
+description = " Implementation of `axplat` hardware abstraction layer for RISC-V sg2002 board"
+keywords = ["arceos", "os", "hal", "embedded", "riscv"]
+categories = ["embedded", "no-std", "hardware-support", "os"]
+repository.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+fp-simd = ["ax-cpu/fp-simd"]
+irq = ["ax-plat/irq", "dep:ax-riscv-plic"]
+rtc = []
+smp = ["ax-plat/smp"]
+
+[dependencies]
+ax-kspin = "0.3"
+ax-lazyinit = "0.4"
+log = "0.4"
+riscv = "0.16"
+ax-riscv-plic = { version = "0.4", optional = true }
+sbi-rt = { version = "0.0.3", features = ["legacy"] }
+dw_uart_rs = "0.2.0"
+
+ax-config-macros = "0.4"
+ax-cpu = { workspace = true, features = ["xuantie-c9xx"] }
+ax-plat = { workspace = true }
+
+[package.metadata.docs.rs]
+targets = ["riscv64gc-unknown-none-elf"]
