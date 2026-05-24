@@ -18,6 +18,7 @@ mod r#loop;
 mod memtrack;
 mod rtc;
 pub mod tty;
+mod video;
 
 use alloc::{format, sync::Arc};
 use core::any::Any;
@@ -345,5 +346,15 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         SimpleDir::new_maker(fs.clone(), Arc::new(event::input_devices(fs.clone()))),
     );
 
+    // Video devices
+    root.add(
+        "video0",
+        Device::new(
+            fs.clone(),
+            NodeType::CharacterDevice,
+            DeviceId::new(81, 0),
+            Arc::new(video::Video::new()),
+        ),
+    );
     SimpleDir::new_maker(fs, Arc::new(root))
 }

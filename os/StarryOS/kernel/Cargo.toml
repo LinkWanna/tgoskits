@@ -53,6 +53,8 @@ axplat-dyn = { workspace = true, optional = true }
 ax-runtime.workspace = true
 ax-sync.workspace = true
 ax-task.workspace = true
+ax-usb.workspace = true
+sg200x-bsp = { workspace = true }
 
 axbacktrace = { workspace = true }
 ax-errno = { workspace = true }
