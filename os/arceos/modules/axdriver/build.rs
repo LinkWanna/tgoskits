@@ -1,4 +1,5 @@
 const NET_DEV_FEATURES: &[&str] = &["fxmac", "ixgbe", "virtio-net"];
+const USB_DEV_FEATURES: &[&str] = &["dwc2"];
 const BLOCK_DEV_FEATURES: &[&str] = &[
     "ramdisk",
     "sdmmc",
@@ -42,6 +43,7 @@ fn main() {
     let is_dyn = has_feature("dyn");
     for (dev_kind, feat_list) in [
         ("net", NET_DEV_FEATURES),
+        ("usb", USB_DEV_FEATURES),
         ("block", BLOCK_DEV_FEATURES),
         ("display", DISPLAY_DEV_FEATURES),
         ("input", INPUT_DEV_FEATURES),
@@ -73,6 +75,10 @@ fn main() {
     println!(
         "cargo::rustc-check-cfg=cfg(net_dev, values({}, \"dummy\"))",
         make_cfg_values(NET_DEV_FEATURES)
+    );
+    println!(
+        "cargo::rustc-check-cfg=cfg(usb_dev, values({}, \"dummy\"))",
+        make_cfg_values(USB_DEV_FEATURES)
     );
     println!(
         "cargo::rustc-check-cfg=cfg(block_dev, values({}, \"dummy\"))",

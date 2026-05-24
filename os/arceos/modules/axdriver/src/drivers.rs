@@ -115,6 +115,22 @@ cfg_if::cfg_if! {
 }
 
 cfg_if::cfg_if! {
+    if #[cfg(usb_dev = "dwc2")] {
+        pub struct Dwc2Driver;
+        register_usb_driver!(Dwc2Driver, ax_driver_usb::dwc2::Dwc2);
+
+        impl DriverProbe for Dwc2Driver {
+            fn probe_global() -> Option<AxDeviceEnum> {
+                let dwc2 = unsafe {
+                    ax_driver_usb::dwc2::Dwc2::new(ax_hal::mem::phys_to_virt(ax_config::devices::USB_PADDR.into()).into())
+                };
+                Some(AxDeviceEnum::from_usb(dwc2))
+            }
+        }
+    }
+}
+
+cfg_if::cfg_if! {
     if #[cfg(block_dev = "bcm2835-sdhci")]{
         pub struct BcmSdhciDriver;
         register_block_driver!(BcmSdhciDriver, ax_driver_block::bcm2835sdhci::SDHCIDriver);

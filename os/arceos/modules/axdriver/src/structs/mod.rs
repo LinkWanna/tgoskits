@@ -17,6 +17,9 @@ pub enum AxDeviceEnum {
     /// Network card device.
     #[cfg(feature = "net")]
     Net(AxNetDevice),
+    /// Usb device.
+    #[cfg(feature = "usb")]
+    Usb(AxUsbDevice),
     /// Block storage device.
     #[cfg(feature = "block")]
     Block(AxBlockDevice),
@@ -38,6 +41,8 @@ impl BaseDriverOps for AxDeviceEnum {
         match self {
             #[cfg(feature = "net")]
             Self::Net(_) => DeviceType::Net,
+            #[cfg(feature = "usb")]
+            Self::Usb(_) => DeviceType::Usb,
             #[cfg(feature = "block")]
             Self::Block(_) => DeviceType::Block,
             #[cfg(feature = "display")]
@@ -56,6 +61,8 @@ impl BaseDriverOps for AxDeviceEnum {
         match self {
             #[cfg(feature = "net")]
             Self::Net(dev) => dev.device_name(),
+            #[cfg(feature = "usb")]
+            Self::Usb(dev) => dev.device_name(),
             #[cfg(feature = "block")]
             Self::Block(dev) => dev.device_name(),
             #[cfg(feature = "display")]

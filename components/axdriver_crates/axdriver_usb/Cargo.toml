@@ -1,0 +1,25 @@
+[package]
+name = "ax-driver-usb"
+edition.workspace = true
+version = "0.3.11"
+repository = "https://github.com/rcore-os/tgoskits"
+authors = [
+    "Yuekai Jia <equation618@gmail.com>",
+    "ChengXiang Qi <kuangjux@outlook.com>",
+    "朝倉水希 <asakuramizu111@gmail.com>",
+    "Yu Chen <yuchen@tsinghua.edu.cn>"
+]
+description = "Common traits and types for USB drivers"
+keywords = ["arceos", "driver", "usb"]
+categories = ["os", "no-std", "hardware-support"]
+readme = "README.md"
+license = "Apache-2.0"
+
+[features]
+default = []
+
+[dependencies]
+ax-hal = { workspace = true }
+ax-driver-base = { workspace = true }
+log = { workspace = true }
+sg200x-bsp = { workspace = true }

@@ -97,6 +97,8 @@ pub use self::structs::AxBlockDevice;
 pub use self::structs::AxDisplayDevice;
 #[cfg(feature = "net")]
 pub use self::structs::AxNetDevice;
+#[cfg(feature = "usb")]
+pub use self::structs::AxUsbDevice;
 pub use self::structs::{AxDeviceContainer, AxDeviceEnum};
 
 /// A structure that contains all device drivers, organized by their category.
@@ -105,6 +107,9 @@ pub struct AllDevices {
     /// All network device drivers.
     #[cfg(feature = "net")]
     pub net: AxDeviceContainer<AxNetDevice>,
+    /// All USB device drivers.
+    #[cfg(feature = "usb")]
+    pub usb: AxDeviceContainer<AxUsbDevice>,
     /// All block device drivers.
     #[cfg(feature = "block")]
     pub block: AxDeviceContainer<AxBlockDevice>,
@@ -160,6 +165,8 @@ impl AllDevices {
         match dev {
             #[cfg(feature = "net")]
             AxDeviceEnum::Net(dev) => self.net.push(dev),
+            #[cfg(feature = "usb")]
+            AxDeviceEnum::Usb(dev) => self.usb.push(dev),
             #[cfg(feature = "block")]
             AxDeviceEnum::Block(dev) => self.block.push(dev),
             #[cfg(feature = "display")]
@@ -186,6 +193,14 @@ pub fn init_drivers() -> AllDevices {
         for (i, dev) in all_devs.net.iter().enumerate() {
             assert_eq!(dev.device_type(), DeviceType::Net);
             debug!("  NIC {}: {:?}", i, dev.device_name());
+        }
+    }
+    #[cfg(feature = "usb")]
+    {
+        debug!("number of USB devices: {}", all_devs.usb.len());
+        for (i, dev) in all_devs.usb.iter().enumerate() {
+            assert_eq!(dev.device_type(), DeviceType::Usb);
+            debug!("  USB device {}: {:?}", i, dev.device_name());
         }
     }
     #[cfg(feature = "block")]

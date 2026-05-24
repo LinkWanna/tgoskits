@@ -6,6 +6,8 @@ pub use crate::drivers::AxDisplayDevice;
 pub use crate::drivers::AxInputDevice;
 #[cfg(feature = "net")]
 pub use crate::drivers::AxNetDevice;
+#[cfg(feature = "usb")]
+pub use crate::drivers::AxUsbDevice;
 #[cfg(feature = "vsock")]
 pub use crate::drivers::AxVsockDevice;
 
@@ -14,6 +16,12 @@ impl super::AxDeviceEnum {
     #[cfg(feature = "net")]
     pub const fn from_net(dev: AxNetDevice) -> Self {
         Self::Net(dev)
+    }
+
+    /// Constructs a usb device.
+    #[cfg(feature = "usb")]
+    pub const fn from_usb(dev: AxUsbDevice) -> Self {
+        Self::Usb(dev)
     }
 
     /// Constructs a block device.

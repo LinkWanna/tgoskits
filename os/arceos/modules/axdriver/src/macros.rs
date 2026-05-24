@@ -10,6 +10,14 @@ macro_rules! register_net_driver {
     };
 }
 
+macro_rules! register_usb_driver {
+    ($driver_type:ty, $device_type:ty) => {
+        /// The unified type of the USB devices.
+        #[cfg(not(feature = "dyn"))]
+        pub type AxUsbDevice = $device_type;
+    };
+}
+
 macro_rules! register_block_driver {
     ($driver_type:ty, $device_type:ty) => {
         /// The unified type of the NIC devices.
@@ -93,6 +101,11 @@ macro_rules! for_each_drivers {
         #[cfg(block_dev = "bcm2835-sdhci")]
         {
             type $drv_type = crate::drivers::BcmSdhciDriver;
+            $code
+        }
+        #[cfg(usb_dev = "dwc2")]
+        {
+            type $drv_type = crate::drivers::Dwc2Driver;
             $code
         }
         #[cfg(net_dev = "ixgbe")]

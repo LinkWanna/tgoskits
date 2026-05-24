@@ -71,6 +71,32 @@ cfg_if! {
 }
 
 cfg_if! {
+    if #[cfg(usb_dev = "dummy")] {
+        pub struct DummyUsbDev;
+        pub struct DummyUsbDriver;
+        register_usb_driver!(DummyUsbDriver, DummyUsbDev);
+
+        impl BaseDriverOps for DummyUsbDev {
+            fn device_type(&self) -> DeviceType {
+                DeviceType::Usb
+            }
+            fn device_name(&self) -> &str {
+                "dummy-usb"
+            }
+        }
+
+        impl UsbDriverOps for DummyUsbDev {
+            fn init(&mut self) -> DevResult<()> {
+                Err(DevError::Unsupported)
+            }
+            fn device_list(&mut self) -> DevResult<ax_driver_usb::TopologyScanExtras> {
+                Err(DevError::Unsupported)
+            }
+        }
+    }
+}
+
+cfg_if! {
     if #[cfg(display_dev = "dummy")] {
         pub struct DummyDisplayDev;
         pub struct DummyDisplayDriver;
