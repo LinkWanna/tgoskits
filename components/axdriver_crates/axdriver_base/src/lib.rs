@@ -34,6 +34,8 @@ pub enum DeviceType {
     Input,
     /// Vsock device (e.g., virtio-vsock).
     Vsock,
+    /// Usb device (e.g., USB controller).
+    Usb,
 }
 
 /// The error type for device operation failures.

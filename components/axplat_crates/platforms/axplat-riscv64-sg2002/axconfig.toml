@@ -40,8 +40,10 @@ boot-stack-size = 0x80000                       # uint
 # MMIO ranges with format (`base_paddr`, `size`).
 mmio-ranges = [
     [0x0300_0000, 0x8000],          # SYSCON
+    [0x0302_0000, 0x4000],          # GPIO0 ~ GPIO3
     [0x0414_0000, 0x1000],          # UART0
     [0x0431_0000, 0x1000],          # cv sdmmc
+    [0x0434_0000, 0x1_0000],        # DWC2 USB
     [0x0502_6000, 0x1000],          # RTC
     [0x0c10_0000, 0x2000],          # TPU
     [0x7000_0000, 0x0400_0000],     # PLIC
@@ -103,5 +105,6 @@ syscon-paddr = 0x0300_0000          # uint
 # 	};
 sdmmc-paddr = 0x0431_0000            # uint
 top-paddr = 0x0300_0000            # uint
+usb-paddr = 0x0434_0000            # uint
 
 root-partition-name = "rootfs"        # str
