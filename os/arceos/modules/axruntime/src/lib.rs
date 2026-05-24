@@ -251,6 +251,8 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
 
         #[cfg(feature = "input")]
         ax_input::init_input(all_devices.input);
+
+        ax_usb::init_usb(all_devices.usb);
     }
 
     #[cfg(feature = "smp")]

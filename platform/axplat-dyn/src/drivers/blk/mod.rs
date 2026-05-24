@@ -6,6 +6,8 @@ use spin::Mutex;
 
 use super::DmaImpl;
 
+#[cfg(feature = "cv181x-sd")]
+mod cv181x_sd;
 #[cfg(feature = "phytium-blk")]
 mod phytium;
 #[cfg(feature = "sdmmc")]

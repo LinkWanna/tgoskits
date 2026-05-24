@@ -33,6 +33,7 @@ members = [
     "components/axdriver_crates/axdriver_input",
     "components/axdriver_crates/axdriver_net",
     "components/axdriver_crates/axdriver_pci",
+    "components/axdriver_crates/axdriver_usb",
     "components/axdriver_crates/axdriver_virtio",
     "components/axdriver_crates/axdriver_vsock",
     "components/axerrno",
@@ -140,6 +141,7 @@ members = [
     "os/arceos/modules/axruntime",
     "os/arceos/modules/axsync",
     "os/arceos/modules/axtask",
+    "os/arceos/modules/axusb",
     "os/arceos/tools/bwbench_client",
     "os/arceos/tools/deptool",
     "os/arceos/tools/raspi4/chainloader",
@@ -218,6 +220,7 @@ ax-driver-display = { version = "0.3.11", path = "components/axdriver_crates/axd
 ax-driver-input = { version = "0.3.11", path = "components/axdriver_crates/axdriver_input" }
 ax-driver-net = { version = "0.3.11", path = "components/axdriver_crates/axdriver_net" }
 ax-driver-pci = { version = "0.3.11", path = "components/axdriver_crates/axdriver_pci" }
+ax-driver-usb = { version = "0.3.11", path = "components/axdriver_crates/axdriver_usb" }
 ax-driver-virtio = { version = "0.3.11", path = "components/axdriver_crates/axdriver_virtio" }
 ax-driver-vsock = { version = "0.3.11", path = "components/axdriver_crates/axdriver_vsock" }
 ax-errno = { version = "0.4.7", path = "components/axerrno" }
@@ -273,6 +276,7 @@ ax-shell = { version = "0.3.1", path = "os/arceos/examples/shell" }
 ax-std = { version = "0.5.11", path = "os/arceos/ulib/axstd" }
 ax-sync = { version = "0.5.12", path = "os/arceos/modules/axsync" }
 ax-task = { version = "0.5.12", path = "os/arceos/modules/axtask" }
+ax-usb = { version = "0.5.12", path = "os/arceos/modules/axusb" }
 ax-timer-list = { version = "0.3.4", path = "components/timer_list" }
 axaddrspace = { version = "0.5.7", path = "components/axaddrspace" }
 axbacktrace = { version = "0.3.8", path = "components/axbacktrace" }
@@ -332,6 +336,7 @@ tg-xtask = { version = "0.5.11", path = "xtask" }
 tgmath = { version = "0.3.1", path = "examples/tgmath" }
 x86_vcpu = { version = "0.5.6", path = "components/x86_vcpu" }
 x86_vlapic = { version = "0.4.7", path = "components/x86_vlapic" }
+sg200x-bsp = { path = "/home/linkwanna/Projects/tgoskits/sg200x-bsp" }
 
 # External crates
 anyhow = "1.0"

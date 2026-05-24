@@ -769,6 +769,7 @@ dependencies = [
  "ax-driver-input",
  "ax-driver-net",
  "ax-driver-pci",
+ "ax-driver-usb",
  "ax-driver-virtio",
  "ax-driver-vsock",
  "ax-errno",
@@ -828,6 +829,16 @@ name = "ax-driver-pci"
 version = "0.3.11"
 dependencies = [
  "virtio-drivers",
+]
+
+[[package]]
+name = "ax-driver-usb"
+version = "0.3.11"
+dependencies = [
+ "ax-driver-base",
+ "ax-hal",
+ "log",
+ "sg200x-bsp",
 ]
 
 [[package]]
@@ -1467,6 +1478,7 @@ dependencies = [
  "ax-percpu",
  "ax-plat",
  "ax-task",
+ "ax-usb",
  "axbacktrace",
  "axklib",
  "axpanic",
@@ -1544,6 +1556,23 @@ dependencies = [
 [[package]]
 name = "ax-timer-list"
 version = "0.3.4"
+
+[[package]]
+name = "ax-usb"
+version = "0.5.12"
+dependencies = [
+ "ax-config",
+ "ax-driver",
+ "ax-errno",
+ "ax-hal",
+ "ax-io",
+ "ax-lazyinit 0.4.6",
+ "ax-plat",
+ "ax-sync",
+ "log",
+ "sg200x-bsp",
+ "tock-registers 0.9.0",
+]
 
 [[package]]
 name = "ax_slab_allocator"
@@ -1749,6 +1778,7 @@ dependencies = [
  "rockchip-pm",
  "rockchip-soc",
  "sdmmc",
+ "sg200x-bsp",
  "simple-sdmmc",
  "some-serial 0.3.1",
  "somehal 0.6.6",
@@ -8364,6 +8394,7 @@ dependencies = [
  "ax-runtime",
  "ax-sync",
  "ax-task",
+ "ax-usb",
  "axbacktrace",
  "axfs-ng-vfs",
  "axplat-dyn",
@@ -8392,6 +8423,7 @@ dependencies = [
  "ringbuf",
  "riscv 0.16.0",
  "scope-local",
+ "sg200x-bsp",
  "slab",
  "spin 0.10.0",
  "starry-process",
