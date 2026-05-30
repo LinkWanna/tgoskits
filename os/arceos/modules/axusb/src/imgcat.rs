@@ -11,7 +11,7 @@
 
 #![allow(dead_code)]
 
-use ax_plat::console::write_bytes;
+use ax_hal::console::write_bytes;
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

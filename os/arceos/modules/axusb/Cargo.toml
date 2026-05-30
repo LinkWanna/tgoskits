@@ -1,6 +1,6 @@
 [package]
 authors = ["Yuekai Jia <equation618@gmail.com>"]
-description = "ArceOS task management module"
+description = "ArceOS USB host protocol stack"
 edition.workspace = true
 license.workspace = true
 name = "ax-usb"
@@ -11,14 +11,12 @@ version = "0.5.12"
 default = []
 
 [dependencies]
-ax-config = { workspace = true }
 ax-driver = { workspace = true, features = ["dwc2"] }
+ax-driver-usb = { workspace = true }
 ax-errno = { workspace = true }
 ax-hal = { workspace = true }
 ax-io = { workspace = true }
 log = { workspace = true }
-ax-plat = { workspace = true }
 ax-sync.workspace = true
 ax-lazyinit.workspace = true
-tock-registers = "0.9"
 sg200x-bsp = { workspace = true }

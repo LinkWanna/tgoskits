@@ -1,3 +1,5 @@
-//! USB 作为主机时，需要对 USB 设备树进行扫描和解析，构建设备树拓扑结构（topology）以供上层使用。
+//! USB 总线设备信息。
+//!
+//! Re-export axdriver_usb 的探测设备信息类型，供上层使用。
 
-pub use sg200x_bsp::usb::host::topology::*;
+pub use ax_driver_usb::{ProbedDeviceInfo, device::DeviceDescriptor};
