@@ -84,15 +84,6 @@ cfg_if! {
                 "dummy-usb"
             }
         }
-
-        impl UsbDriverOps for DummyUsbDev {
-            fn init(&mut self) -> DevResult<()> {
-                Err(DevError::Unsupported)
-            }
-            fn device_list(&mut self) -> DevResult<ax_driver_usb::TopologyScanExtras> {
-                Err(DevError::Unsupported)
-            }
-        }
     }
 }
 
