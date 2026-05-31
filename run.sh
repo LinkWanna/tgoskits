@@ -24,6 +24,7 @@ elif [ "$CMD" = "build" ]; then
     cp target/riscv64gc-unknown-none-elf/release/starryos.bin uboot/kernel
     cd uboot
     mkimage -f boot.its boot.sd
+    cd ..
 
     # 检查是否存在 /dev/sda1
     # 如果存在，则说明已经插入了 SD 卡，并且可以将生成的 boot.sd 复制到 SD 卡的 boot 分区中
@@ -32,10 +33,13 @@ elif [ "$CMD" = "build" ]; then
         echo "SD card detected. Copying boot.sd to SD card..."
         sudo mkdir -p /run/media/linkwanna/boot
         sudo mount /dev/sda1 /run/media/linkwanna/boot
-        sudo cp boot.sd /run/media/linkwanna/boot
+        sudo cp uboot/boot.sd /run/media/linkwanna/boot
         sudo sync
         sudo umount /run/media/linkwanna/boot
         sudo rm -r /run/media/linkwanna/boot
+
+        cd disk
+        echo y | sh fix.sh
     fi
 else
     echo "Usage: sh run.sh <command>"
