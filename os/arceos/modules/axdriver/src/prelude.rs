@@ -34,4 +34,11 @@ pub use {
 };
 
 #[cfg(feature = "usb")]
-pub use crate::structs::AxUsbDevice;
+pub use {
+    crate::structs::AxUsbDevice,
+    ax_driver_usb::{
+        dwc2::Dwc2HostController, ConfigurationDescriptor, DeviceDescriptor, Direction,
+        EndpointAddress, EndpointInfo, EndpointType, ProbedDeviceInfo, SetupPacket,
+        TransferRequest, UsbDevice, UsbEndpoint, UsbHostController,
+    },
+};

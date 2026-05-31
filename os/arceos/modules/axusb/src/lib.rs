@@ -33,7 +33,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use ax_driver::{AxDeviceContainer, prelude::*};
-use ax_driver_usb::{
+use ax_driver::prelude::{
     ConfigurationDescriptor, DeviceDescriptor, EndpointInfo, ProbedDeviceInfo, SetupPacket,
     UsbDevice as UsbDeviceTrait, UsbEndpoint, UsbHostController,
 };
@@ -217,7 +217,7 @@ pub fn init_usb(mut usb_devs: AxDeviceContainer<AxUsbDevice>) {
         info!("USB: DWC2 base = {:#010x}", dwc2_base);
 
         // 使用新版 Dwc2HostController（封装平台初始化 + HC 初始化）
-        let mut hc = ax_driver_usb::dwc2::Dwc2HostController::new(dwc2_base);
+        let mut hc = Dwc2HostController::new(dwc2_base);
         match hc.init() {
             Ok(()) => {
                 let mut host = USBHost::new(hc);
