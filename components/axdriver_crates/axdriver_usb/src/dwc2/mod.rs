@@ -11,7 +11,7 @@ pub mod osal_impl;
 pub mod phy;
 pub mod pinctrl;
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 
 use ax_driver_base::{BaseDriverOps, DevError, DevResult, DeviceType};
 use dwc2_driver::{Dwc2Controller, Speed, channel::EpType};
@@ -348,6 +348,26 @@ impl UsbDevice for Dwc2DeviceAdapter {
             _mps: 512,
         }))
     }
+
+    fn open_endpoint_with(
+        &mut self,
+        ep_addr: u8,
+        info: EndpointInfo,
+    ) -> DevResult<Box<dyn UsbEndpoint>> {
+        let ep_type = match info.transfer_type {
+            crate::EndpointType::Control => EpType::Control,
+            crate::EndpointType::Isochronous => EpType::Isochronous,
+            crate::EndpointType::Bulk => EpType::Bulk,
+            crate::EndpointType::Interrupt => EpType::Interrupt,
+        };
+        Ok(Box::new(Dwc2EndpointAdapter {
+            ep_addr,
+            ep_type,
+            dev_addr: self.dev_addr,
+            controller: self.controller,
+            _mps: info.max_packet_size,
+        }))
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -412,6 +432,7 @@ impl UsbEndpoint for Dwc2EndpointAdapter {
                 let dma = ctrl.dma_buf().ok_or(DevError::NoMemory)?;
                 let dma_phys = dma.phys_at(0);
                 let dma_size = dma.size();
+                let dma_va = dma.va_ptr();
 
                 if direction == crate::Direction::In {
                     let data = unsafe { buffer_slice(buf) };
@@ -430,6 +451,9 @@ impl UsbEndpoint for Dwc2EndpointAdapter {
                             dma_phys,
                         )
                         .map_err(|_| DevError::Io)?;
+
+                    // DMA 写入后必须 invalidate cache（匹配 BSP dcache_invalidate_after_dma）
+                    ctrl.dma_cache_invalidate(dma_va, n);
 
                     // 从 DMA 缓冲区拷贝结果
                     unsafe {
@@ -460,6 +484,9 @@ impl UsbEndpoint for Dwc2EndpointAdapter {
                         s[..xfer].copy_from_slice(data);
                     }
 
+                    // DMA 读取前必须 clean cache（匹配 BSP dcache_clean_for_dma）
+                    ctrl.dma_cache_clean(dma_va, xfer);
+
                     let n = ch
                         .execute_with_retry(
                             dwc2_driver::channel::PID_DATA0,
@@ -485,6 +512,7 @@ impl UsbEndpoint for Dwc2EndpointAdapter {
             } => {
                 let dma = ctrl.dma_buf().ok_or(DevError::NoMemory)?;
                 let dma_phys = dma.phys_at(0);
+                let dma_va = dma.va_ptr();
                 let data = unsafe { buffer_slice(buf) };
 
                 // 解码 ISOC wMaxPacketSize（匹配 sg200x-bsp isoch_in_uframe）
@@ -514,8 +542,10 @@ impl UsbEndpoint for Dwc2EndpointAdapter {
                     _ => (dwc2_driver::channel::PID_DATA0, 1u32),
                 };
 
-                let n = match ch.execute_with_retry(pid, xfer as u32, pktcnt, dma_phys) {
+                let n = match ch.execute(pid, xfer as u32, pktcnt, dma_phys) {
                     Ok(n) => {
+                        // DMA 写入后必须 invalidate cache（匹配 BSP dcache_invalidate_after_dma）
+                        ctrl.dma_cache_invalidate(dma_va, n);
                         unsafe {
                             let s =
                                 core::slice::from_raw_parts(ctrl.dma_buf().unwrap().va_ptr(), n);
@@ -524,7 +554,7 @@ impl UsbEndpoint for Dwc2EndpointAdapter {
                         }
                         n
                     }
-                    Err(_) => 0, // isoch NAK = no data this microframe
+                    Err(_) => 0, // isoch NAK/error = no data this microframe
                 };
 
                 ctrl.release_channel(ch);

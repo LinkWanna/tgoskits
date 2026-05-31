@@ -102,12 +102,12 @@ impl Osal for AxOsal {
     }
 
     fn dma_cache_clean(&self, va: *const u8, len: usize) {
-        log::info!("dma_clean: va={:#018x} len={}", va as usize, len);
+        log::trace!("dma_clean: va={:#018x} len={}", va as usize, len);
         dcache_clean_range(va as usize, len);
     }
 
     fn dma_cache_invalidate(&self, va: *const u8, len: usize) {
-        log::info!("dma_inval: va={:#018x} len={}", va as usize, len);
+        log::trace!("dma_inval: va={:#018x} len={}", va as usize, len);
         dcache_invalidate_range(va as usize, len);
     }
 }

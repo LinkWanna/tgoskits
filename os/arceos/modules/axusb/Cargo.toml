@@ -19,4 +19,3 @@ ax-io = { workspace = true }
 log = { workspace = true }
 ax-sync.workspace = true
 ax-lazyinit.workspace = true
-sg200x-bsp = { workspace = true }

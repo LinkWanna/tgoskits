@@ -49,7 +49,7 @@ impl Video {
         );
 
         let device = host.open(device_id).expect("Failed to open UVC device");
-        let camera = UvcCamera::probe(device, device_id as u8).expect("UVC probe/commit failed");
+        let camera = UvcCamera::probe(device).expect("UVC probe/commit failed");
 
         info!("UVC: camera ready, frame_size={}", camera.frame_size());
 

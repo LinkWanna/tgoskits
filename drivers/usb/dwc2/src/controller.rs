@@ -152,6 +152,18 @@ impl Dwc2Controller {
         self.dma_buf.as_ref()
     }
 
+    /// 清理（写回）DMA 缓冲区 cache 到内存。
+    /// 在 DMA 从该地址**读取**之前调用（OUT 传输）。
+    pub fn dma_cache_clean(&self, va: *const u8, len: usize) {
+        self.osal.dma_cache_clean(va, len);
+    }
+
+    /// 失效（丢弃）DMA 缓冲区 cache。
+    /// 在 DMA 向该地址**写入**之后调用（IN 传输）。
+    pub fn dma_cache_invalidate(&self, va: *const u8, len: usize) {
+        self.osal.dma_cache_invalidate(va, len);
+    }
+
     /// 等待设备连接，返回检测到的速度。
     pub fn wait_connect(&self) -> Result<Speed, Error> {
         let r = self.mmio.regs();

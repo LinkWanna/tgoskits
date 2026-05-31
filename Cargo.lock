@@ -1573,7 +1573,6 @@ dependencies = [
  "ax-lazyinit 0.4.6",
  "ax-sync",
  "log",
- "sg200x-bsp",
 ]
 
 [[package]]

@@ -156,6 +156,21 @@ pub trait UsbDevice: Send {
     /// Bulk/Interrupt/Isochronous 传输。
     fn open_endpoint(&mut self, ep_addr: u8) -> DevResult<Box<dyn UsbEndpoint>>;
 
+    /// 按地址 + 端点信息打开一个非 EP0 端点。
+    ///
+    /// 与 `open_endpoint` 不同，调用方可以指定端点的传输类型、MPS
+    /// 等信息，后端直接使用而无需从描述符推断。
+    ///
+    /// 默认实现调用 `open_endpoint` 然后丢弃 info（后向兼容）。
+    fn open_endpoint_with(
+        &mut self,
+        ep_addr: u8,
+        info: EndpointInfo,
+    ) -> DevResult<Box<dyn UsbEndpoint>> {
+        let _ = info;
+        self.open_endpoint(ep_addr)
+    }
+
     // ── 便捷方法（默认实现，委托给 open_endpoint + submit）──
 
     /// 批量传输 IN。

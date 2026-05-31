@@ -3,7 +3,7 @@
 //! 基于 axdriver_usb 的 HC-agnostic trait，提供：
 //! - [`USBHost`]：主机控制器管理 + 设备枚举
 //! - [`Device`]：已打开设备的句柄封装
-//! - [`class::uvc`]：USB Video Class driver（委托给 sg200x-bsp）
+//! - [`class::uvc`]：USB Video Class driver
 //!
 //! # 使用示例
 //!
@@ -20,7 +20,7 @@
 //! let dev = host.open(0)?;
 //!
 //! // 4. 使用 class driver
-//! let mut cam = UvcCamera::probe(dev, dev_id)?;
+//! let mut cam = UvcCamera::probe(dev)?;
 //! let frame = cam.capture_frame()?;
 //! ```
 
@@ -34,8 +34,8 @@ use alloc::{boxed::Box, vec::Vec};
 
 use ax_driver::{AxDeviceContainer, prelude::*};
 use ax_driver_usb::{
-    ConfigurationDescriptor, DeviceDescriptor, ProbedDeviceInfo, SetupPacket,
-    UsbDevice as UsbDeviceTrait, UsbHostController,
+    ConfigurationDescriptor, DeviceDescriptor, EndpointInfo, ProbedDeviceInfo, SetupPacket,
+    UsbDevice as UsbDeviceTrait, UsbEndpoint, UsbHostController,
 };
 use ax_lazyinit::LazyInit;
 use ax_sync::Mutex;
@@ -171,6 +171,15 @@ impl Device {
     /// 声明接口（SET_INTERFACE）。
     pub fn claim_interface(&mut self, interface: u8, alternate: u8) -> DevResult<()> {
         self.handle.set_interface(interface, alternate)
+    }
+
+    /// 按地址 + 端点信息打开端点。
+    pub fn open_endpoint_with(
+        &mut self,
+        ep_addr: u8,
+        info: EndpointInfo,
+    ) -> DevResult<Box<dyn UsbEndpoint>> {
+        self.handle.open_endpoint_with(ep_addr, info)
     }
 
     /// 批量传输 IN。
