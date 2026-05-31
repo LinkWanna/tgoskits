@@ -1,0 +1,14 @@
+[package]
+name = "dwc2"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+usb-if = { workspace = true }
+tock-registers = "0.9"
+log = { workspace = true }
