@@ -23,4 +23,7 @@ ax-hal = { workspace = true }
 ax-driver-base = { workspace = true }
 log = { workspace = true }
 sg200x-bsp = { workspace = true }
+usb-if = { workspace = true }
 tock-registers = "0.9"
+spin = { workspace = true }
+dwc2-driver = { path = "../../../drivers/usb/dwc2", package = "dwc2" }

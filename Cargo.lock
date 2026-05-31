@@ -837,8 +837,12 @@ version = "0.3.11"
 dependencies = [
  "ax-driver-base",
  "ax-hal",
+ "dwc2",
  "log",
  "sg200x-bsp",
+ "spin 0.10.0",
+ "tock-registers 0.9.0",
+ "usb-if",
 ]
 
 [[package]]
@@ -1561,17 +1565,15 @@ version = "0.3.4"
 name = "ax-usb"
 version = "0.5.12"
 dependencies = [
- "ax-config",
  "ax-driver",
+ "ax-driver-usb",
  "ax-errno",
  "ax-hal",
  "ax-io",
  "ax-lazyinit 0.4.6",
- "ax-plat",
  "ax-sync",
  "log",
  "sg200x-bsp",
- "tock-registers 0.9.0",
 ]
 
 [[package]]
@@ -3512,6 +3514,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da3751978e2d9bced3cb480631bb2c14098357ae269ac95475720aee545c6dcd"
 dependencies = [
  "tock-registers 0.8.1",
+]
+
+[[package]]
+name = "dwc2"
+version = "0.5.11"
+dependencies = [
+ "log",
+ "tock-registers 0.9.0",
+ "usb-if",
 ]
 
 [[package]]
@@ -9533,6 +9544,20 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+]
+
+[[package]]
+name = "usb-if"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d2f3d338fd260603442d59d583012de4d3ca6b0122593602dc50db3fb7f6817"
+dependencies = [
+ "anyhow",
+ "futures",
+ "log",
+ "num_enum",
+ "spin 0.10.0",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
