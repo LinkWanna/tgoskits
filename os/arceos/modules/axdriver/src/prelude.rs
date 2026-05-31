@@ -27,10 +27,11 @@ pub use {
     crate::structs::AxNetDevice,
     ax_driver_net::{NetBufPtr, NetDriverOps, NetIrqEvent},
 };
-#[cfg(feature = "usb")]
-pub use crate::structs::AxUsbDevice;
 #[cfg(feature = "vsock")]
 pub use {
     crate::structs::AxVsockDevice,
     ax_driver_vsock::{VsockAddr, VsockConnId, VsockDriverEvent, VsockDriverOps},
 };
+
+#[cfg(feature = "usb")]
+pub use crate::structs::AxUsbDevice;

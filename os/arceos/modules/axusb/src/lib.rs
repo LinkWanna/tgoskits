@@ -3,7 +3,7 @@
 //! 基于 axdriver_usb 的 HC-agnostic trait，提供：
 //! - [`USBHost`]：主机控制器管理 + 设备枚举
 //! - [`Device`]：已打开设备的句柄封装
-//! - [`class`]：USB class driver（UVC、MSC 等）
+//! - [`class::uvc`]：USB Video Class driver（委托给 sg200x-bsp）
 //!
 //! # 使用示例
 //!
@@ -20,7 +20,7 @@
 //! let dev = host.open(0)?;
 //!
 //! // 4. 使用 class driver
-//! let mut cam = UvcCamera::probe(dev)?;
+//! let mut cam = UvcCamera::probe(dev, dev_id)?;
 //! let frame = cam.capture_frame()?;
 //! ```
 
@@ -34,16 +34,14 @@ use alloc::{boxed::Box, vec::Vec};
 
 use ax_driver::{AxDeviceContainer, prelude::*};
 use ax_driver_usb::{
-    ProbedDeviceInfo, SetupPacket, UsbDevice as UsbDeviceTrait, UsbHostController,
-    device::{ConfigurationDescriptor, DeviceDescriptor},
+    ConfigurationDescriptor, DeviceDescriptor, ProbedDeviceInfo, SetupPacket,
+    UsbDevice as UsbDeviceTrait, UsbHostController,
 };
 use ax_lazyinit::LazyInit;
 use ax_sync::Mutex;
 
 pub mod class;
 pub mod imgcat;
-pub mod topology;
-pub mod usb_camera;
 
 // ============================================================================
 // USBHost — 主机控制器 + 设备管理
@@ -170,9 +168,9 @@ impl Device {
         self.handle.set_configuration(value)
     }
 
-    /// 声明接口。
+    /// 声明接口（SET_INTERFACE）。
     pub fn claim_interface(&mut self, interface: u8, alternate: u8) -> DevResult<()> {
-        self.handle.claim_interface(interface, alternate)
+        self.handle.set_interface(interface, alternate)
     }
 
     /// 批量传输 IN。
@@ -199,9 +197,8 @@ static USB_HOST: LazyInit<Mutex<USBHost>> = LazyInit::new();
 
 /// 初始化 USB 子系统。
 ///
-/// 此函数由 axruntime 在设备初始化阶段调用。
-/// 保持向后兼容的签名（接受 AxDeviceContainer<AxUsbDevice>），
-/// 内部从中提取 DWC2 基址，创建新版 USBHost。
+/// 由 axruntime 在设备初始化阶段调用。从平台设备树提取 DWC2 基址，
+/// 初始化主机控制器，执行总线枚举。
 pub fn init_usb(mut usb_devs: AxDeviceContainer<AxUsbDevice>) {
     info!("Initialize USB subsystem...");
 
