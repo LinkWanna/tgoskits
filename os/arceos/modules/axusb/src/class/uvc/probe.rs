@@ -23,40 +23,6 @@ pub(crate) fn build_probe_commit_payload(sel: &UvcStreamSelection) -> [u8; UVC_P
     b
 }
 
-/// 打印 PROBE/COMMIT 结果。
-pub(crate) fn dump_probe(prefix: &str, p: &[u8]) {
-    if p.len() < 26 {
-        return;
-    }
-    let bm_hint = u16::from_le_bytes([p[0], p[1]]);
-    let fmt_ix = p[2];
-    let frame_ix = p[3];
-    let interval = u32::from_le_bytes([p[4], p[5], p[6], p[7]]);
-    let key_frm = u16::from_le_bytes([p[8], p[9]]);
-    let pframe = u16::from_le_bytes([p[10], p[11]]);
-    let comp_q = u16::from_le_bytes([p[12], p[13]]);
-    let comp_w = u16::from_le_bytes([p[14], p[15]]);
-    let delay = u16::from_le_bytes([p[16], p[17]]);
-    let max_video = u32::from_le_bytes([p[18], p[19], p[20], p[21]]);
-    let max_pkt = u32::from_le_bytes([p[22], p[23], p[24], p[25]]);
-    info!(
-        "UVC: {} bmHint={:#06x} fmt={} frame={} iv={} keyFrm={} pFrm={} compQ={} compW={} \
-         delay={} dwMaxVideoFrameSize={} dwMaxPayloadTransferSize={}",
-        prefix,
-        bm_hint,
-        fmt_ix,
-        frame_ix,
-        interval,
-        key_frm,
-        pframe,
-        comp_q,
-        comp_w,
-        delay,
-        max_video,
-        max_pkt
-    );
-}
-
 /// 根据协商 payload 重选最匹配的 Isoch alt（跳过 mult>1，SG2002 兼容）。
 pub(crate) fn reselect_isoch_alt_for_payload(sel: &mut UvcStreamSelection) {
     if sel.xfer != UvcXferKind::Isoch || sel.isoch_alts_count == 0 {

@@ -6,7 +6,7 @@ use ax_driver::prelude::*;
 
 use super::{
     constants::*,
-    probe::{build_probe_commit_payload, dump_probe, reselect_isoch_alt_for_payload},
+    probe::{build_probe_commit_payload, reselect_isoch_alt_for_payload},
     setup::*,
     types::*,
 };
@@ -31,6 +31,10 @@ pub(crate) fn uvc_read_config(device: &mut Device, cfg_index: u8) -> DevResult<V
     Ok(buf)
 }
 
+fn streaming_setup(interface: u8, selector: u8, op: UvcOp, len: u16) -> SetupPacket {
+    UvcRequest::streaming(interface, selector, op, len).to_setup()
+}
+
 /// PROBE → GET_CUR → COMMIT → SET_INTERFACE，协商流参数并启动。
 pub(crate) fn uvc_start_video_stream(
     device: &mut Device,
@@ -41,12 +45,12 @@ pub(crate) fn uvc_start_video_stream(
     let _ = device.claim_interface(sel.vs_interface, 0);
 
     let probe_init = build_probe_commit_payload(sel);
-    dump_probe("PROBE.SET", &probe_init);
 
     device.control_out(
-        uvc_set_cur_vs(
+        streaming_setup(
             sel.vs_interface,
             VS_PROBE_CONTROL,
+            UvcOp::SetCur,
             UVC_PROBE_COMMIT_LEN as u16,
         ),
         &probe_init,
@@ -54,25 +58,25 @@ pub(crate) fn uvc_start_video_stream(
 
     let mut probe_max = [0u8; UVC_PROBE_COMMIT_LEN];
     let _ = device.control_in(
-        uvc_get_max_vs(
+        streaming_setup(
             sel.vs_interface,
             VS_PROBE_CONTROL,
+            UvcOp::GetMax,
             UVC_PROBE_COMMIT_LEN as u16,
         ),
         &mut probe_max,
     );
-    dump_probe("PROBE.MAX", &probe_max);
 
     let mut probe = [0u8; UVC_PROBE_COMMIT_LEN];
     device.control_in(
-        uvc_get_cur_vs(
+        streaming_setup(
             sel.vs_interface,
             VS_PROBE_CONTROL,
+            UvcOp::GetCur,
             UVC_PROBE_COMMIT_LEN as u16,
         ),
         &mut probe,
     )?;
-    dump_probe("PROBE.CUR", &probe);
 
     sel.negotiated_payload_size = u32::from_le_bytes([probe[22], probe[23], probe[24], probe[25]]);
     sel.negotiated_frame_size = u32::from_le_bytes([probe[18], probe[19], probe[20], probe[21]]);
@@ -90,9 +94,10 @@ pub(crate) fn uvc_start_video_stream(
     }
 
     device.control_out(
-        uvc_set_cur_vs(
+        streaming_setup(
             sel.vs_interface,
             VS_COMMIT_CONTROL,
+            UvcOp::SetCur,
             UVC_PROBE_COMMIT_LEN as u16,
         ),
         &probe,
