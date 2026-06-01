@@ -10,7 +10,7 @@ target=/dev/sda
 # 创建 MBR 分区表
 sudo parted -s ${target} mklabel msdos
 sudo parted -s ${target} mkpart primary fat32 1MiB 257MiB
-sudo parted -s ${target} mkpart primary ext4 257MiB 4353MiB
+sudo parted -s ${target} mkpart primary ext4 257MiB 1281MiB
 sudo parted -s ${target} set 1 boot on
 
 # 格式化分区

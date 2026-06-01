@@ -3,8 +3,9 @@
 use alloc::{vec, vec::Vec};
 use core::sync::atomic::Ordering;
 
-use ax_driver::prelude::*;
-use ax_driver::prelude::{Direction, EndpointAddress, EndpointInfo, EndpointType, TransferRequest};
+use ax_driver::prelude::{
+    Direction, EndpointAddress, EndpointInfo, EndpointType, TransferRequest, *,
+};
 
 use super::{constants::LAST_EOF_FID, types::*};
 use crate::Device;
@@ -162,7 +163,7 @@ pub(crate) fn capture_one_frame_via_device(
         interval: 0,
     };
 
-    let mut ep = device.open_endpoint_with(ep_addr, ep_info)?;
+    let mut ep = device.open_endpoint(ep_info)?;
     let mut work_buf = vec![0u8; max_work];
     let mut jpeg_data = Vec::with_capacity(jpeg_cap);
 

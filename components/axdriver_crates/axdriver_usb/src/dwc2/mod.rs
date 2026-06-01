@@ -335,25 +335,8 @@ impl UsbDevice for Dwc2DeviceAdapter {
         }
     }
 
-    fn open_endpoint(&mut self, ep_addr: u8) -> DevResult<Box<dyn UsbEndpoint>> {
-        let _ep_num = ep_addr & 0x7F;
-        let _ep_dir_in = ep_addr & 0x80 != 0;
-        let ep_type = EpType::Bulk; // 默认 Bulk，上层可覆盖
-
-        Ok(Box::new(Dwc2EndpointAdapter {
-            ep_addr,
-            ep_type,
-            dev_addr: self.dev_addr,
-            controller: self.controller,
-            _mps: 512,
-        }))
-    }
-
-    fn open_endpoint_with(
-        &mut self,
-        ep_addr: u8,
-        info: EndpointInfo,
-    ) -> DevResult<Box<dyn UsbEndpoint>> {
+    fn open_endpoint(&mut self, info: EndpointInfo) -> DevResult<Box<dyn UsbEndpoint>> {
+        let ep_addr = info.address.raw();
         let ep_type = match info.transfer_type {
             crate::EndpointType::Control => EpType::Control,
             crate::EndpointType::Isochronous => EpType::Isochronous,

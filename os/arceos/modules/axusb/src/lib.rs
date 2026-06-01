@@ -32,10 +32,12 @@ extern crate alloc;
 
 use alloc::{boxed::Box, vec::Vec};
 
-use ax_driver::{AxDeviceContainer, prelude::*};
-use ax_driver::prelude::{
-    ConfigurationDescriptor, DeviceDescriptor, EndpointInfo, ProbedDeviceInfo, SetupPacket,
-    UsbDevice as UsbDeviceTrait, UsbEndpoint, UsbHostController,
+use ax_driver::{
+    AxDeviceContainer,
+    prelude::{
+        ConfigurationDescriptor, DeviceDescriptor, EndpointInfo, ProbedDeviceInfo, SetupPacket,
+        UsbDevice as UsbDeviceTrait, UsbEndpoint, UsbHostController, *,
+    },
 };
 use ax_lazyinit::LazyInit;
 use ax_sync::Mutex;
@@ -173,28 +175,9 @@ impl Device {
         self.handle.set_interface(interface, alternate)
     }
 
-    /// 按地址 + 端点信息打开端点。
-    pub fn open_endpoint_with(
-        &mut self,
-        ep_addr: u8,
-        info: EndpointInfo,
-    ) -> DevResult<Box<dyn UsbEndpoint>> {
-        self.handle.open_endpoint_with(ep_addr, info)
-    }
-
-    /// 批量传输 IN。
-    pub fn bulk_in(&mut self, ep_addr: u8, buf: &mut [u8]) -> DevResult<usize> {
-        self.handle.bulk_in(ep_addr, buf)
-    }
-
-    /// 批量传输 OUT。
-    pub fn bulk_out(&mut self, ep_addr: u8, buf: &[u8]) -> DevResult<usize> {
-        self.handle.bulk_out(ep_addr, buf)
-    }
-
-    /// 同步传输 IN。
-    pub fn isoch_in(&mut self, ep_addr: u8, buf: &mut [u8]) -> DevResult<usize> {
-        self.handle.isoch_in(ep_addr, buf)
+    /// 打开端点。
+    pub fn open_endpoint(&mut self, info: EndpointInfo) -> DevResult<Box<dyn UsbEndpoint>> {
+        self.handle.open_endpoint(info)
     }
 }
 

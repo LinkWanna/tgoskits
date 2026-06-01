@@ -122,11 +122,8 @@ pub trait UsbHostController: Send + Sync {
 
 /// 已打开的 USB 设备句柄。
 ///
-/// 提供两类 API：
-/// 1. **传统 flat 方法**：`control_in/out`、`set_configuration`、`set_interface`
-/// 2. **端点模式**：`open_endpoint(ep_addr)` → `UsbEndpoint::submit(TransferRequest)`
-///
-/// 新 class driver 推荐使用端点模式以获得更清晰的传输语义。
+/// - **控制传输**：`control_in/out`、`set_configuration`、`set_interface`
+/// - **端点传输**：`open_endpoint_with(info)` → `UsbEndpoint::submit(TransferRequest)`
 pub trait UsbDevice: Send {
     /// 获取设备描述符。
     fn descriptor(&self) -> &DeviceDescriptor;
@@ -137,10 +134,10 @@ pub trait UsbDevice: Send {
     /// 设置活动配置（SET_CONFIGURATION）。
     fn set_configuration(&mut self, value: u8) -> DevResult<()>;
 
-    /// 设置接口 alternate setting（SET_INTERFACE，即 claim interface）。
+    /// 设置接口 alternate setting（SET_INTERFACE）。
     fn set_interface(&mut self, interface: u8, alternate: u8) -> DevResult<()>;
 
-    // ── EP0 控制传输（始终可用）──
+    // ── EP0 控制传输 ──
 
     /// 控制传输 IN（设备→主机）。
     fn control_in(&mut self, setup: SetupPacket, buf: &mut [u8]) -> DevResult<usize>;
@@ -148,54 +145,14 @@ pub trait UsbDevice: Send {
     /// 控制传输 OUT（主机→设备，无数据阶段时 buf 为空）。
     fn control_out(&mut self, setup: SetupPacket, buf: &[u8]) -> DevResult<usize>;
 
-    // ── 端点模式（推荐）──
+    // ── 端点传输 ──
 
-    /// 按地址打开一个非 EP0 端点。
+    /// 打开一个非 EP0 端点。
     ///
-    /// 返回的 `UsbEndpoint` 可通过 `submit(TransferRequest)` 执行
-    /// Bulk/Interrupt/Isochronous 传输。
-    fn open_endpoint(&mut self, ep_addr: u8) -> DevResult<Box<dyn UsbEndpoint>>;
-
-    /// 按地址 + 端点信息打开一个非 EP0 端点。
-    ///
-    /// 与 `open_endpoint` 不同，调用方可以指定端点的传输类型、MPS
-    /// 等信息，后端直接使用而无需从描述符推断。
-    ///
-    /// 默认实现调用 `open_endpoint` 然后丢弃 info（后向兼容）。
-    fn open_endpoint_with(
-        &mut self,
-        ep_addr: u8,
-        info: EndpointInfo,
-    ) -> DevResult<Box<dyn UsbEndpoint>> {
-        let _ = info;
-        self.open_endpoint(ep_addr)
-    }
-
-    // ── 便捷方法（默认实现，委托给 open_endpoint + submit）──
-
-    /// 批量传输 IN。
-    fn bulk_in(&mut self, ep_addr: u8, buf: &mut [u8]) -> DevResult<usize> {
-        let mut ep = self.open_endpoint(ep_addr)?;
-        let req = TransferRequest::bulk_in(buf);
-        let result = ep.submit(req)?;
-        Ok(result.actual_length)
-    }
-
-    /// 批量传输 OUT。
-    fn bulk_out(&mut self, ep_addr: u8, buf: &[u8]) -> DevResult<usize> {
-        let mut ep = self.open_endpoint(ep_addr)?;
-        let req = TransferRequest::bulk_out(buf);
-        let result = ep.submit(req)?;
-        Ok(result.actual_length)
-    }
-
-    /// 同步传输 IN（单微帧）。
-    fn isoch_in(&mut self, ep_addr: u8, buf: &mut [u8]) -> DevResult<usize> {
-        let mut ep = self.open_endpoint(ep_addr)?;
-        let req = TransferRequest::iso_in(buf, &[buf.len()]);
-        let result = ep.submit(req)?;
-        Ok(result.actual_length)
-    }
+    /// `EndpointInfo.address` 指定端点地址，
+    /// `EndpointInfo.transfer_type` 指定传输类型（Bulk/Isoch/Interrupt）。
+    /// 返回的 `UsbEndpoint` 通过 `submit(TransferRequest)` 执行传输。
+    fn open_endpoint(&mut self, info: EndpointInfo) -> DevResult<Box<dyn UsbEndpoint>>;
 }
 
 /// USB 端点句柄。
