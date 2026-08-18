@@ -65,6 +65,7 @@ members = [
     "drivers/media/v4l2-core",
     "drivers/media/uvc",
     "drivers/media/videobuffer",
+    "drivers/media/vivid",
     "drivers/net/*",
     "drivers/npu/*",
     "drivers/pci/*",
@@ -256,6 +257,7 @@ usb-serial = { version = "0.1.3", path = "drivers/usb/usb-serial" }
 v4l2-core = { version = "0.1.0", path = "drivers/media/v4l2-core" }
 videobuffer = { version = "0.1.0", path = "drivers/media/videobuffer" }
 media-uvc = { version = "0.1.0", path = "drivers/media/uvc" }
+vivid = { version = "0.1.0", path = "drivers/media/vivid" }
 dwmmc-host = { version = "0.3.5", path = "drivers/blk/dwmmc-host", default-features = false }
 phytium-mci-host = { version = "0.3.5", path = "drivers/blk/phytium-mci-host", default-features = false }
 cv181x-sdhci = { version = "0.1.5", path = "drivers/blk/cv181x-sdhci", default-features = false }

@@ -36,7 +36,7 @@ pub struct V4l2DevNode {
     inner: Arc<crate::sync::Mutex<VideoDevice>>,
     /// 与驱动共享的可选事件队列。
     /// 驱动推入此队列的事件会在每次 ioctl 后被投递到文件句柄（fh）。
-    event_source: Option<Arc<crate::sync::Mutex<Vec<Event>>>>,
+    event_source: Option<Arc<ax_sync::Mutex<Vec<Event>>>>,
     /// 驱动完成事件唤醒源（构造时从驱动取得）：vb2 队列内建 PollSet，
     /// `buffer_done`/`set_error` 发布状态后唤醒（IRQ 安全）——poll 等待者
     /// 挂在这里，与驱动内 DQBUF 阻塞共用（对齐 Linux vb2 done_wq 模型）。
@@ -45,7 +45,7 @@ pub struct V4l2DevNode {
 }
 
 impl V4l2DevNode {
-    fn new(device: VideoDevice, event_source: Option<Arc<crate::sync::Mutex<Vec<Event>>>>) -> Self {
+    fn new(device: VideoDevice, event_source: Option<Arc<ax_sync::Mutex<Vec<Event>>>>) -> Self {
         // 完成唤醒由驱动（vb2 队列）内建：构造时取一次 poll_set，
         // 之后 register 无需设备锁。
         let poll_rx = device.poll_set();
@@ -60,11 +60,13 @@ impl V4l2DevNode {
     ///
     /// 驱动将事件推入 `event_source`；ioctl 处理器
     /// 在每次分发后将它们排空到文件句柄中。
-    pub fn from_input(
-        device: VideoDevice,
-        event_source: Arc<crate::sync::Mutex<Vec<Event>>>,
-    ) -> Self {
+    pub fn from_input(device: VideoDevice, event_source: Arc<ax_sync::Mutex<Vec<Event>>>) -> Self {
         Self::new(device, Some(event_source))
+    }
+
+    /// Create a device node from an output device (no V4L2 events).
+    pub fn from_output(device: VideoDevice) -> Self {
+        Self::new(device, None)
     }
 
     /// 将共享驱动事件队列中的事件投递到 fh（订阅过滤在框架内完成）。

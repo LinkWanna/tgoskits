@@ -828,7 +828,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             let driver: Arc<ax_sync::Mutex<dyn v4l2_core::IoctlOps>> =
                 Arc::new(ax_sync::Mutex::new(cam_driver));
             let vdev = VideoDevice::new(driver, "uvc");
-            let events = Arc::new(Mutex::new(alloc::vec::Vec::new()));
+            let events = Arc::new(ax_sync::Mutex::new(alloc::vec::Vec::new()));
 
             root.add(
                 "video0",
@@ -837,6 +837,39 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
                     NodeType::CharacterDevice,
                     DeviceId::new(81, 0),
                     Arc::new(video::V4l2DevNode::from_input(vdev, events)),
+                ),
+            );
+        }
+
+        // /dev/vivid-vid-cap — vivid test driver capture node.
+        {
+            let cam = vivid::vid_cap::VividCapture::new();
+            let events = cam.event_source();
+            let driver: Arc<ax_sync::Mutex<dyn v4l2_core::IoctlOps>> =
+                Arc::new(ax_sync::Mutex::new(cam));
+            let vdev = VideoDevice::new(driver, "vivid");
+            root.add(
+                "vivid-vid-cap",
+                Device::new(
+                    fs.clone(),
+                    NodeType::CharacterDevice,
+                    DeviceId::new(81, 2),
+                    Arc::new(video::V4l2DevNode::from_input(vdev, events)),
+                ),
+            );
+        }
+        // /dev/vivid-vid-out — vivid test driver output node.
+        {
+            let driver: Arc<ax_sync::Mutex<dyn v4l2_core::IoctlOps>> =
+                Arc::new(ax_sync::Mutex::new(vivid::vid_out::VividOutput::new()));
+            let vdev = VideoDevice::new(driver, "vivid");
+            root.add(
+                "vivid-vid-out",
+                Device::new(
+                    fs.clone(),
+                    NodeType::CharacterDevice,
+                    DeviceId::new(81, 3),
+                    Arc::new(video::V4l2DevNode::from_output(vdev)),
                 ),
             );
         }
