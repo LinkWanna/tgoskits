@@ -90,7 +90,7 @@ pub(super) struct IsoTransferResult {
     pub(super) actual_length: usize,
 }
 
-pub(super) struct SubmittedTransfer {
+pub(crate) struct SubmittedTransfer {
     inner: SubmittedTransferInner,
 }
 
@@ -163,7 +163,7 @@ impl SubmittedTransfer {
         }
     }
 
-    pub(super) fn poll_reclaim(
+    pub(crate) fn poll_reclaim(
         &self,
         cx: &mut Context<'_>,
     ) -> Poll<StarryResult<TransferCompletion>> {
@@ -187,7 +187,7 @@ impl SubmittedTransfer {
         }
     }
 
-    pub(super) fn cancel(&self) -> StarryResult<()> {
+    pub(crate) fn cancel(&self) -> StarryResult<()> {
         match &self.inner {
             SubmittedTransferInner::Endpoint {
                 endpoint,

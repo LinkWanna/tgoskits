@@ -40,6 +40,10 @@ mod cvi_jpu;
 mod cvi_usb_camera;
 #[cfg(feature = "sg2002-cvi-usb-camera")]
 mod cvi_vdec;
+#[cfg(feature = "sg2002-v4l2")]
+mod uvc_camera;
+#[cfg(feature = "sg2002-v4l2")]
+mod video;
 
 use alloc::{format, sync::Arc};
 use core::{
@@ -49,7 +53,11 @@ use core::{
 
 use ax_lazyinit::OnceLock;
 use axfs_ng_vfs::{DeviceId, Filesystem, NodeFlags, NodeType, VfsError, VfsResult};
+#[cfg(feature = "sg2002-v4l2")]
+use v4l2_core::device::VideoDevice;
 
+#[cfg(feature = "sg2002-v4l2")]
+use crate::pseudofs::usbfs;
 use crate::sync::Mutex;
 
 #[cfg(feature = "sg2002")]
@@ -801,6 +809,34 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
                     NodeType::CharacterDevice,
                     DeviceId::new(10, 203),
                     Arc::new(cvi_vdec::CviVdec::new(jpu)),
+                ),
+            );
+        }
+    }
+
+    #[cfg(feature = "sg2002-v4l2")]
+    {
+        // /dev/video0 — V4L2 UVC camera（usbfs 枚举到的 UVC 设备）。
+        let snaps = usbfs::usb_device_snapshots();
+        let snap = snaps.iter().find(|s| {
+            let blob = &s.descriptor_blob;
+            blob.len() >= 18 && blob[4] == 0xEF && blob[5] == 0x02 && blob[6] == 0x01
+        });
+        info!("uvc camera snapshot: {}", snap.is_some());
+        if let Some(snap) = snap {
+            let cam_driver = uvc_camera::create_camera_driver(snap);
+            let driver: Arc<ax_sync::Mutex<dyn v4l2_core::IoctlOps>> =
+                Arc::new(ax_sync::Mutex::new(cam_driver));
+            let vdev = VideoDevice::new(driver, "uvc");
+            let events = Arc::new(Mutex::new(alloc::vec::Vec::new()));
+
+            root.add(
+                "video0",
+                Device::new(
+                    fs.clone(),
+                    NodeType::CharacterDevice,
+                    DeviceId::new(81, 0),
+                    Arc::new(video::V4l2DevNode::from_input(vdev, events)),
                 ),
             );
         }
