@@ -1,0 +1,21 @@
+[package]
+name = "videobuffer"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ax-alloc = { workspace = true }
+ax-memory-addr = { workspace = true }
+ax-runtime = { workspace = true }
+ax-mm = { workspace = true }
+ax-sync = { workspace = true }
+axpoll = { workspace = true }
+log = { workspace = true }
+v4l2-core = { workspace = true }
+
+[dev-dependencies]
+# host 单测：ax-task test → ax-hal/host-test 提供宿主机链接后端；
+# ax-sync host-test 让 SpinLock 在宿主机上安全。
+ax-sync = { workspace = true, features = ["host-test"] }
+ax-task = { workspace = true, features = ["test"] }
