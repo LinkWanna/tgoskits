@@ -1,111 +1,110 @@
-<h1 align="center">TGOSKits</h1>
+## Introduce
 
-<p align="center">An integrated Rust workspace for operating system and virtualization development</p>
+本仓库用于为 Tgoskits 适配 v4l2 子系统，以满足在 StarryOS 上使用摄像头、视频采集、视频编码等需求。
 
-<div align="center">
+由于 StarryOS 目前的 USB 协议栈对于流式采集/实时采集的支持不够完善，因此我在一定程度上重构了上游的 DWC2 USB 主机后端实现，以支持 UVC 摄像头的实时采集。
 
-[![Build & Test](https://github.com/rcore-os/tgoskits/actions/workflows/ci.yml/badge.svg)](https://github.com/rcore-os/tgoskits/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/edition-2024-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+**主线合并进度：**
+- **DWC2 USB 主机后端重构**：https://github.com/rcore-os/tgoskits/pull/2066
 
-</div>
+## Directory
 
-English | [中文](README_CN.md)
+目前涉及的主要目录和文件：
 
-## 1. Introduction
+- `os/StarryOS/kernel/src/pseudofs/dev/video.rs`: v4l2 设备在文件系统中的接口委托实现
+- `os/StarryOS/kernel/src/pseudofs/dev/uvc_camera.rs`: 用于为 UVC 驱动提供 USB Handle，防止驱动依赖内核、内核依赖驱动，这样的依赖循环
+- `drivers/media/v4l2-core`: v4l2 驱动框架，包含 ioctl 接口层、vb2 缓冲区管理子系统
+- `drivers/media/uvc`: UVC 摄像头驱动实现，主要参考 `drivers/usb/usb-device/uvc`
+- `drivers/media/vivid`: vivid 测试驱动实现，主要参考 `linux/drivers/media/test-drivers`
+- `drivers/usb/usb-host/src/backend/kmod/dwc2`: DWC2 USB 主机后端实现，主要参考 `linux/drivers/usb/host/dwc2`
 
-TGOSKits is an integrated repository for operating system and virtualization development. It brings together ArceOS, StarryOS, Axvisor, shared components, platform crates, and driver infrastructure in one workspace. A unified `cargo xtask` entry point is used for build, run, debug, and test workflows, making the repository suitable for component development, cross-system integration, and system-level validation.
+包括 2 个内核与驱动间的胶水模块和 2 个驱动模块 1 个 v4l2 核心和整个 dwc2 后端的重构，代码量统计如下：
 
-Project site: [https://rcore-os.cn/tgoskits/](https://rcore-os.cn/tgoskits/). To understand the project scope and system relationships, start from the [TGOSKits documentation](https://rcore-os.cn/tgoskits/docs/introduction).
-
-## 2. Repository
-
-TGOSKits brings multiple standalone subprojects into the root repository through Git Subtree and provides unified entry points for building, running, testing, and documentation. The main directories are:
-
-```text
-tgoskits/
-├── components/                # reusable component crates
-├── os/
-│   ├── arceos/                # ArceOS modular kernel
-│   ├── StarryOS/              # StarryOS Linux-compatible OS
-│   └── axvisor/               # Axvisor Type-I Hypervisor
-├── platform/                  # platform and board support crates
-├── drivers/                   # reusable drivers and driver subsystems
-├── test-suit/                 # system-level test cases
-├── xtask/                     # unified root command entry
-├── scripts/                   # repository maintenance, test, and sync scripts
-└── docs/                      # Docusaurus documentation site
+```sh
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ Language              Files        Lines         Code     Comments       Blanks
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ TOML                      4           72           63            3            6
+─────────────────────────────────────────────────────────────────────────────────
+ Rust                     56        14213        11966          788         1459
+ |- Markdown              54         1658            0         1514          144
+ (Total)                            15871        11966         2302         1603
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ Total                    60        15943        12029         2305         1609
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-For subtree synchronization, component layering, and development conventions, see [repository structure and collaboration](https://rcore-os.cn/tgoskits/docs/contributing/repo) and the [architecture overview](https://rcore-os.cn/tgoskits/docs/architecture/overview).
+## Milestone
 
-## 3. Quick Experience
+- [✅] 初步完成 v4l2 驱动框架，从 Linux 迁移 ioctl 接口层，部分实现 vivid 测试驱动，并适配到 StarryOS `/dev` 中
+- [✅] 初步完成 vb2 缓冲区管理子系统，将内存管理机制从驱动层委托到 vb2 中
+- [✅] 完成基础的用户态测试程序，包括 ffmpeg、v4l2-ctl 和自己实现的综合测试程序
+- [✅] 以 sg200x-bsp 作为后端、v4l2 作为 ioctl 前端实现 UVC 摄像头驱动
+- [✅] 利用 JPU 将 JPEG 格式转换为 YUYV 格式以加速 YUYV 输出
+- [✅] 以 sg200x-bsp 作为 USB endpoint 后端，CrabUSB 作为 USB 控制器，v4l2 作为 ioctl 前端实现 UVC 摄像头驱动
+- [✅] 删除 sg200x-bsp 依赖，仅使用 CrabUSB 协议栈作为后端，v4l2 作为 ioctl 前端实现 UVC 摄像头驱动
+- [✅] 支持 USB isochronous 传输在 endpoint 上的多 transaction 传输（mult>1）
+- [✅] 支持摄像头的原生 YUYV 格式输出
+- [✅] 重构并优化当前的 vb2 缓冲区实现，以支持 DMA buffer 的零拷贝传输
+- [✅] 重构 DWC2 USB 主机后端实现，以支持 DDMA 传输
+- [✅] 重构 vb2 实现，基于缓冲区来驱动图像采样
+- [✅] 完善 uvc 驱动对 v4l2 框架的适配，通过 `v4l2-ctl` 工具的测试，确保摄像头的采集、编码、输出等功能正常
+- [  ] 稳定 v4l2-core 驱动框架，完善文件句柄和事件机制，保证多线程安全 
+- [  ] DWC2 重构主线合并
+- [  ] uvc 驱动通过 `v4l2-compliance` 全量测试
+- [  ] 完善 v4l2 相关文档及其说明
 
-### 3.1 Environment Setup
+## 上游修改
 
-For a first run, the recommended path is to use the project container image. It already includes the Rust toolchain, QEMU, and common cross-compilation dependencies, matching the CI environment:
+这部分中，我完成了对 DWC2 USB 主机后端的重构，重构前状态：所有模块位于 `mod.rs` 中，利用常量与寄存器偏移量来实现对寄存器的访问，模块划分不显著，且不支持 Isochronous 传输，也没有 DDMA 支持，无法满足实时采集的需求。
 
-```bash
-git clone https://github.com/rcore-os/tgoskits.git
-cd tgoskits
+### DWC2 USB 主机后端重构
 
-docker pull ghcr.io/rcore-os/tgoskits-container:latest
-docker run -it --rm \
-  -v "$(pwd)":/workspace \
-  -w /workspace \
-  ghcr.io/rcore-os/tgoskits-container:latest
+这部分的核心工作如下：
+
+1. 将 `mod.rs` 中的所有模块拆分为独立的模块文件，便于维护和扩展。
+2. 添加 Descriptor DMA 支持，以处理 Isochronous 传输下 125us 的硬性传输间隔要求。破坏性更新，考虑到只有最古老的 DWC2 的版本（2.90a）不支持 DDMA，可以考虑不  Buffer DMA 回退路径。
+  - DWC2 的 DDMA 类似与网卡的 DMA，传输数据时需要将 Descriptor 写入到 Descriptor DMA 中，DWC2 会根据 Descriptor 的内容来进行数据传输。
+  - 在我的实现中，我设置了 128 大小的 DMA 描述符表，每次处理 64 个，将中断间隔从 125us 扩展到 125us * 64 = 8ms，避免了频繁中断
+3. 添加了 Isochronous 传输的状态机
+
+### usbfs API 修改
+
+我尽可能做了最小化修改，仅仅将 `submit_endpoint_transfer` 接口暴露了出来，但是这部分依旧需要与上游讨论，`SubmittedTransfer` 是 `usbfs::manager` 的对象，因此，如果内核外部驱动需要使用，则必须使用 trait 做依赖反转。
+
+```rust
+pub(crate) fn submit_endpoint_transfer(
+    &self,
+    endpoint: u8,
+    request: TransferRequest,
+) -> StarryResult<SubmittedTransfer> {
+    self.lease.submit_endpoint_transfer(endpoint, request)
+}
 ```
 
-If you do not use the container, prepare at least Rust, basic build tools, and common QEMU packages. The recommended QEMU version is 10.2.1, matching the container and CI environment; distribution packages are usually enough for quick trials, but switch to the container if a target is missing or behavior differs:
+## 图像采集
 
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-sudo apt update
-sudo apt install -y cmake make ninja-build pkg-config e2fsprogs fakeroot
-sudo apt install -y qemu-system-arm qemu-system-riscv64 qemu-system-x86
-cargo install cargo-binutils
-```
+### 传输层：利用 DDMA + TransferRequest Pipeline 将数据抽象为“流”
 
-See [quick start overview](https://rcore-os.cn/tgoskits/docs/quickstart/overview) and [CI and container images](https://rcore-os.cn/tgoskits/docs/build/ci) for the full environment guide.
+在 USB 的四种传输策略中，Control、Bulk、Interrupt 都可以视为事务型传输，数据传输的间隔不固定，传输的速率也不固定。而 Isochronous 则是流式传输，数据传输的间隔固定，传输的速率也基本固定（取决于设备），而且没有重传机制，丢包后不会重传。
 
-### 3.2 QEMU Verification
+在我实现了 DDMA 后，将用户请求切分为 non_isochronous 和 isochronous 两种传输策略，Isochronous 传输策略下，端点长期占用 usb host 通道，用户侧多次发起 TransferRequest 后，isochronous 状态机会在 TransferRequest 缓冲区非空时，自动填充新的 DMA 描述符链表，保证数据的连续性和实时性。
 
-First confirm that common QEMU commands are available, preferably matching QEMU 10.2.1 from the container and CI environment:
+### 采集层：利用 videobuffer 把“流”构造成“帧”
 
-```bash
-qemu-system-riscv64 --version
-qemu-system-aarch64 --version
-qemu-system-x86_64 --version
-qemu-system-loongarch64 --version
-```
+相比一周前，videobuffer 这部分已经趋于完善了，将通用的内存管理逻辑从具体的驱动中抽象出来，形成了一个通用的缓冲区管理子系统，驱动只需要关心如何从缓冲区中获取数据，提供一个能够从 USB Package 中解码数据的回调函数即可。
 
-Then use the unified `cargo xtask` entry point to run the three system paths:
+### 接口层：v4l2 驱动 ioctl 框架
 
-```bash
-# ArceOS: run the default Hello World
-cargo xtask arceos qemu --arch aarch64
+已经完成了最主要的两大功能，图像采集和控制接口，并且完成了对 UVC 驱动的适配，能够通过 v4l2-ctl 工具进行测试，确保摄像头的采集、编码、输出等功能正常。
 
-# StarryOS: prepare rootfs before the first run
-cargo xtask starry rootfs --arch aarch64
-cargo xtask starry qemu --arch aarch64
+目前正在逐步通过 `v4l2-compliance` 工具的全面测试，确保 v4l2 驱动的接口符合规范。测试仓库：https://github.com/LinkWanna/v4l2-test
 
-# Axvisor: run a Hypervisor QEMU scenario
-cargo xtask axvisor qemu --arch aarch64
-```
+## 已知缺陷
 
-If you only want the shortest path to a successful run, start with the default ArceOS Hello World app. Pass `--package arceos-shell` when you specifically need the interactive Shell. For more systems, architecture combinations, and QEMU options, see the [quick start overview](https://rcore-os.cn/tgoskits/docs/quickstart/overview) and [run and QEMU](https://rcore-os.cn/tgoskits/docs/build/run).
+当前还是处于快速迭代的时候，有一些机制并非刻意设计，而是为了快速实现功能而临时设计的，有一些又是因为基础设施限制，后续会进行重构和优化。
 
-## 4. Contributing
-
-Issues and pull requests are welcome. A typical workflow is:
-
-1. Read [repository structure and collaboration](https://rcore-os.cn/tgoskits/docs/contributing/repo).
-2. Create a feature branch from `dev`.
-3. Run the relevant `cargo xtask` build, test, or clippy checks after making changes.
-4. Open a PR and describe the change scope, validation, and impact.
-
-For a full development example, documentation contribution, and rootfs maintenance notes, see the [contribution docs](https://rcore-os.cn/tgoskits/docs/contributing/demo). Use [GitHub Issues](https://github.com/rcore-os/tgoskits/issues) for feedback and [GitHub Pull Requests](https://github.com/rcore-os/tgoskits/pulls) for patches.
-
-## 5. License
-
-TGOSKits as a whole is licensed under [Apache-2.0](./LICENSE). Some subtree components may include their own license files; if there is any difference, use the license file in the component directory as the source of truth.
+1. usbfs 的一些设计适应不了 UVC 驱动的需求，毕竟之前也没有具体的设备使用过，我遇到的问题如下：
+  - 依赖方向有问题，当前 UVC 是第一个在内核外基于 USB 协议栈实现的驱动，不可能直接依赖 usbfs 的 `UsbDeviceHandle`，因为这会导致依赖循环，只能用 trait 来让依赖反转。
+2. DWC2 的 zero-copy 机制还不完善，当前的实现是 DWC2 内部分配 DMA Buffer，然后通过 DMA 将数据拷贝到 TransferRequest 的缓冲区中，如果要求改为 zero-copy，则会遇到这样的问题：
+  - 用户提供的缓冲区是虚拟地址，无法保证缓冲区的物理连续性，因此无法直接传给 DWC2 进行 DMA 传输，这部分要求用户做约束
