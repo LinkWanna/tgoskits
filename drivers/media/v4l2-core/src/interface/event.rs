@@ -21,13 +21,12 @@ pub struct EventSubscription {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Event {
-    pub ty: u32, // [out] 事件类型
-    /// 事件负载（各事件特有结构的联合体，最大 64 字节）。
-    pub data: [u8; 64], // [out] 事件负载
-    pub pending: u32, // [out] 该类型的待处理事件数量
-    pub sequence: u32, // [out] 单调递增序列号
+    pub ty: u32,             // [out] 事件类型
+    pub data: [u8; 64],      // [out] 事件负载
+    pub pending: u32,        // [out] 该类型的待处理事件数量
+    pub sequence: u32,       // [out] 单调递增序列号
     pub timestamp: Timespec, // [out] 事件时间戳
-    pub id: u32, // [out] 事件类型相关 ID（例如控制 ID）
+    pub id: u32,             // [out] 事件类型相关 ID（例如控制 ID）
     pub reserved: [u32; 8],
 }
 

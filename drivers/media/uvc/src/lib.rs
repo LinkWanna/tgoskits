@@ -18,7 +18,10 @@ use crab_usb::{
     },
 };
 use log::*;
-use v4l2_core::interface::{colorspace, format};
+use v4l2_core::{
+    ctrls::CtrlHandler,
+    interface::{colorspace, format},
+};
 use videobuffer::{Vb2Queue, VirtualAllocator};
 
 use crate::stream::{ISO_BATCH, ISO_DEPTH, IsoBatchPipeline, IsoStreamHandle, UvcTrace};
@@ -273,8 +276,7 @@ pub struct UvcDevice<H: UvcHandle> {
     formats: Vec<VideoFormat>,
     alt_settings: Vec<AlternateSetting>,
     current_format: Option<VideoFormat>,
-    pub(crate) ctrls: v4l2_core::ctrls::CtrlHandler,
-    /// vb2 队列：SpinLock（完成路径在流 worker 任务上下文）。
+    pub(crate) ctrls: CtrlHandler,
     pub(crate) queue: Arc<Vb2Queue<VirtualAllocator>>,
     pub(crate) state: Mutex<UvcDeviceState>,
     need_payload: usize,

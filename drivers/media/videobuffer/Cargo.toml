@@ -9,7 +9,7 @@ ax-alloc = { workspace = true }
 ax-memory-addr = { workspace = true }
 ax-runtime = { workspace = true }
 ax-mm = { workspace = true }
-ax-sync = { workspace = true }
+ax-sync = { workspace = true, features = ["sleep"] }
 axpoll = { workspace = true }
 log = { workspace = true }
 v4l2-core = { workspace = true }

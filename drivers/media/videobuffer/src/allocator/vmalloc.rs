@@ -42,19 +42,14 @@ struct AllocEntry {
 /// 帧（vaddr 在线性映射区，`virt_to_phys` 换算有效）→ `map_linear`
 /// 逐页映射到虚拟段（虚拟连续、物理离散）。`mmap` 偏移按 stride
 /// （页对齐 plane 大小）在 alloc 时计算，buffer 间不重叠。
-///
-/// 线程安全：所有方法都接受 `&self`。内部状态由
-/// `SpinLock` 保护——采集路径（media-uvc 拼帧）与 ioctl 路径
-/// 均为任务上下文，纯自旋锁即可。`kernel_aspace` 内部同样是
-/// IRQ 安全锁。
 pub struct VirtualAllocator {
-    entries: ax_sync::SpinLock<Vec<AllocEntry>>,
+    entries: ax_sync::Mutex<Vec<AllocEntry>>,
 }
 
 impl VirtualAllocator {
     pub fn new() -> Self {
         Self {
-            entries: ax_sync::SpinLock::new(Vec::new()),
+            entries: ax_sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -65,49 +60,85 @@ impl Default for VirtualAllocator {
     }
 }
 
+/// 逐页分配 `size`（页对齐）字节的物理帧，返回物理地址列表。
+///
+/// 必须在可睡上下文调用：全局分配失败路径会触发页缓存回收。
+/// 中途失败时已分配的帧随回收逻辑一起归还，不泄漏。
+fn alloc_frames(size: usize) -> Option<Vec<usize>> {
+    let mut pages = Vec::with_capacity(size / PAGE_SIZE_4K);
+    for _ in 0..size / PAGE_SIZE_4K {
+        let vaddr = match global_allocator().alloc_pages(1, PAGE_SIZE_4K, UsageKind::VirtMem) {
+            Ok(vaddr) => vaddr,
+            Err(_) => {
+                free_frames(&pages);
+                return None;
+            }
+        };
+        let pa = virt_to_phys(VirtAddr::from(vaddr)).as_usize();
+        pages.push(pa);
+    }
+    Some(pages)
+}
+
+/// 归还物理帧（无锁；不触发回收）。
+fn free_frames(pages: &[usize]) {
+    for &pa in pages {
+        let vaddr = phys_to_virt(PhysAddr::from_usize(pa));
+        global_allocator().dealloc_pages(vaddr.as_usize(), 1, UsageKind::VirtMem);
+    }
+}
+
+/// 在内核地址空间查找空闲虚拟段并逐页映射已分配的物理帧。
+fn map_frames(pages: &[usize]) -> Option<usize> {
+    let size = pages.len() * PAGE_SIZE_4K;
+    let mut aspace = kernel_aspace().lock();
+    let limit = VirtAddrRange::new(aspace.base(), aspace.end());
+    let start = aspace.find_free_area(aspace.base(), size, limit)?;
+    for (i, &pa) in pages.iter().enumerate() {
+        if aspace
+            .map_linear(
+                start + i * PAGE_SIZE_4K,
+                PhysAddr::from_usize(pa),
+                PAGE_SIZE_4K,
+                MappingFlags::READ | MappingFlags::WRITE,
+            )
+            .is_err()
+        {
+            for j in 0..i {
+                let _ = aspace.unmap(start + j * PAGE_SIZE_4K, PAGE_SIZE_4K);
+            }
+            return None;
+        }
+    }
+    Some(start.as_usize())
+}
+
 impl Vb2MemOps for VirtualAllocator {
     fn alloc(&self, sizes: &[u32]) -> Result<Vec<MemPlane>, V4l2Error> {
-        let mut entries = self.entries.lock();
+        if sizes.is_empty() || sizes.contains(&0) {
+            return Err(V4l2Error::InvalidArgument);
+        }
+        // 单 plane 语义：stride = 页对齐的第一个 plane 大小；每 buffer 一个 entry。
+        let stride = align_up_4k(sizes[0] as usize);
+        // 仅取登记数量用于 UAPI 偏移编码，不跨锁持有。
+        let buf_index = self.entries.lock().len();
+
         let mut planes = Vec::with_capacity(sizes.len());
-        let mut aspace = kernel_aspace().lock();
-
-        // 单 plane 语义：stride = 页对齐 plane 大小；每 buffer 一个 entry。
-        let stride = align_up_4k(sizes.first().copied().unwrap_or(0) as usize);
-        let buf_index = entries.len();
-
         for (p, &size) in sizes.iter().enumerate() {
-            if size == 0 {
-                return Err(V4l2Error::InvalidArgument);
-            }
             let aligned = align_up_4k(size as usize);
-            // 内核地址空间内找空闲虚拟段（4K 对齐）。
-            let limit = VirtAddrRange::new(aspace.base(), aspace.end());
-            let start = aspace
-                .find_free_area(aspace.base(), aligned, limit)
-                .ok_or(V4l2Error::NoMemory)?;
-
-            // 逐页分配物理帧（axalloc 堆——vaddr 在线性映射区，
-            // virt_to_phys 换算有效）并映射到虚拟段。
-            let mut pages = Vec::with_capacity(aligned / PAGE_SIZE_4K);
-            for i in 0..aligned / PAGE_SIZE_4K {
-                let vaddr = global_allocator()
-                    .alloc_pages(1, PAGE_SIZE_4K, UsageKind::VirtMem)
-                    .map_err(|_| V4l2Error::NoMemory)?;
-                let pa = virt_to_phys(VirtAddr::from(vaddr)).as_usize();
-                aspace
-                    .map_linear(
-                        start + i * PAGE_SIZE_4K,
-                        PhysAddr::from_usize(pa),
-                        PAGE_SIZE_4K,
-                        MappingFlags::READ | MappingFlags::WRITE,
-                    )
-                    .map_err(|_| V4l2Error::NoMemory)?;
-                pages.push(pa);
-            }
-
-            let vaddr = start.as_usize();
+            // 物理帧在可睡上下文（无锁）分配：分配失败路径的页缓存回收
+            // 需要睡锁，不得在 entries/kernel_aspace 自旋锁内进行。
+            let Some(pages) = alloc_frames(aligned) else {
+                return Err(V4l2Error::NoMemory);
+            };
+            // find→map 原子窗口（aspace 自旋锁；页表扩展分配失败时
+            // 回收回调在原子上下文跳过，仅返回 ENOMEM，不 panic）。
+            let Some(vaddr) = map_frames(&pages) else {
+                free_frames(&pages);
+                return Err(V4l2Error::NoMemory);
+            };
             if p == 0 {
-                entries.push(AllocEntry {
+                self.entries.lock().push(AllocEntry {
                     vaddr,
                     size: aligned,
                     pages,
@@ -128,23 +159,21 @@ impl Vb2MemOps for VirtualAllocator {
     }
 
     fn release(&self, planes: &[MemPlane]) {
-        let mut entries = self.entries.lock();
-        let mut aspace = kernel_aspace().lock();
         for plane in planes {
-            // 匹配后立即移除 entry：entries 只保留活跃 buffer，同一 vaddr 至多
-            // 一个 entry。曾长期不删除——下次 alloc 时 find_free_area 复用刚
-            // unmap 的段地址，新 entry 与旧 entry vaddr 冲突，mmap/release 的
-            // find 命中旧 entry → 返回已释放/错页数的物理页（板上实测 pages
-            // short → mmap EINVAL，及 use-after-free 隐患）。
-            if let Some(pos) = entries.iter().position(|e| e.vaddr == plane.cookie) {
-                let e = entries.swap_remove(pos);
-                // 先摘映射（PTE），再归还物理帧。
-                aspace.unmap(VirtAddr::from(e.vaddr), e.size).ok();
-                for pa in &e.pages {
-                    let vaddr = phys_to_virt(PhysAddr::from_usize(*pa));
-                    global_allocator().dealloc_pages(vaddr.as_usize(), 1, UsageKind::VirtMem);
-                }
-            }
+            // 摘除 entry（entries 锁只覆盖登记表窗口）。
+            let entry = {
+                let mut entries = self.entries.lock();
+                let Some(pos) = entries.iter().position(|e| e.vaddr == plane.cookie) else {
+                    continue;
+                };
+                entries.swap_remove(pos)
+            };
+            // 摘除虚拟映射（aspace 锁只覆盖 unmap 窗口，不跨物理帧归还）。
+            let _ = kernel_aspace()
+                .lock()
+                .unmap(VirtAddr::from(entry.vaddr), entry.size);
+            // 归还物理帧（无锁）。
+            free_frames(&entry.pages);
         }
     }
 

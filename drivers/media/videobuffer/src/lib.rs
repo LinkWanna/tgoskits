@@ -4,24 +4,6 @@
 //! 实现 buffer 状态机（DEQUEUED → QUEUED → ACTIVE → DONE），
 //! 通过 [`Vb2MemOps`] 提供可插拔的内存分配，
 //! 通过 [`Vb2Ops`] 提供驱动回调。
-//!
-//! ## 架构
-//!
-//! ```text
-//! Vb2Queue<M>                    ← 状态机（no_std）
-//!
-//! Vb2MemOps 的实现：
-//! ```
-//!
-//! # 锁约定
-//!
-//! 所有公共方法都接受 `&self` 并在内部
-//! `SpinLock` 锁上串行化，因此队列可在任务上下文
-//! （ioctl / 采集 worker）之间安全共享。
-//! `Vb2Ops` 回调在**持有内部锁时**被调用：
-//! 实现不得重入队列，且必须保持
-//! 临界区尽量短。
-//! 完成唤醒（`poll_rx`）总在内部锁**释放后**发出。
 
 #![no_std]
 #[cfg(test)]
@@ -35,7 +17,7 @@ pub mod buf;
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 
 pub use allocator::{Vb2MemOps, VirtualAllocator};
-use ax_sync::SpinLock;
+use ax_sync::Mutex;
 use axpoll::{IoEvents, PollSet};
 pub use buf::{BufferState, MemPlane, VIDEO_MAX_PLANES, Vb2Buffer};
 use v4l2_core::{V4l2Error, interface::buffer::BufFlags};
@@ -79,12 +61,8 @@ impl QueueInner {
 }
 
 /// V4L2 buffer 队列——vb2 状态机。
-///
-/// 线程安全：所有方法都接受 `&self` 并在内部
-/// `SpinLock` 锁上串行化。[`buffer_done`](Self::buffer_done) 由采集
-/// 侧（任务上下文）调用。
 pub struct Vb2Queue<M: Vb2MemOps> {
-    inner: SpinLock<QueueInner>,
+    inner: Mutex<QueueInner>,
     alloc: M,
     /// 完成事件唤醒源（对齐 Linux vb2 `done_wq`）：`buffer_done`/`set_error`
     /// 在状态发布后唤醒，DQBUF 阻塞等待与 VFS poll 共用。
@@ -98,7 +76,7 @@ pub struct Vb2Queue<M: Vb2MemOps> {
 impl<M: Vb2MemOps> Vb2Queue<M> {
     pub fn new(alloc: M, min_buffers: u32, max_buffers: u32) -> Self {
         Self {
-            inner: SpinLock::new(QueueInner {
+            inner: Mutex::new(QueueInner {
                 buffers: Vec::new(),
                 queued_list: VecDeque::new(),
                 done_list: VecDeque::new(),
