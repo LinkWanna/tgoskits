@@ -4,40 +4,43 @@
 //! 控件、裁剪、输入选择以及缓冲管理
 //! （基于 Vb2Queue；STREAMON 同步预填充测试图案）。
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use axpoll::PollSet;
 use v4l2_core::{
     self, IoctlOps, V4L2DriverOps,
-    ctrls::CtrlHandler,
+    ctrls::{CtrlHandler, class::UserClassCtrl},
     error::V4l2Error,
     filehandler::V4l2Fh,
     interface::{
         buffer::{BufFlags, Buffer, Requestbuffers},
         capability::{Capabilities, Capability},
         colorspace::{Colorspace, Quantization, XferFunc, YcbcrEncoding},
-        common::{BufType, Field, Memory, Timeval},
+        {BufType, Field, Memory, Timeval},
         crop::{Crop, Cropcap, Selection, SelectionTarget},
-        ctrl::Control,
-        event::{CtrlChange, EventSubscription},
+        event::{Event, EventSubscription},
         format::{
             Fmtdesc, Format, FrameIntervalEnum, FrameIntervalType, FrameSizeEnum, FrameSizeType,
         },
         inout::InputType,
         stream::StreamParm,
     },
-    uapi::controls::UserClassCtrl,
 };
 use videobuffer::{BufferState, Vb2Queue, VirtualAllocator};
 
 use crate::{
-    ctrls::{VividCtrl, test_pattern_name},
+    ctrls::{TEST_PATTERN_NAMES, VividCtrl},
     tpg::{self, Pattern, PixelFormat},
     vid_common,
 };
 
 // ── 共享状态（Arc 共享） ────────────
+
+/// 注册一个静态控件配置；失败属于编程错误（一次性初始化断言）。
+fn reg(name: &str, r: v4l2_core::Result<()>) {
+    r.expect(name);
+}
 
 /// ioctl 路径与填充路径之间共享的格式 + 控件状态。
 struct VividCaptureState {
@@ -57,60 +60,102 @@ struct VividCaptureState {
 }
 
 impl VividCaptureState {
-    fn new() -> Self {
+    fn new(events: Arc<ax_sync::Mutex<Vec<Event>>>) -> Self {
         let mut ctrls = CtrlHandler::new();
-        ctrls.new_int(
-            UserClassCtrl::Brightness as u32,
+        // 控件配置为静态硬编码，注册失败属于编程错误（expect 为一次性初始化断言）。
+        reg(
             "Brightness",
-            0,
-            255,
-            1,
-            128,
-            None,
+            ctrls.new_int(
+                UserClassCtrl::Brightness as u32,
+                "Brightness",
+                0,
+                255,
+                1,
+                128,
+                None,
+            ),
         );
-        ctrls.new_int(
-            UserClassCtrl::Contrast as u32,
+        reg(
             "Contrast",
-            0,
-            255,
-            1,
-            128,
-            None,
+            ctrls.new_int(
+                UserClassCtrl::Contrast as u32,
+                "Contrast",
+                0,
+                255,
+                1,
+                128,
+                None,
+            ),
         );
-        ctrls.new_int(
-            UserClassCtrl::Saturation as u32,
+        reg(
             "Saturation",
-            0,
-            255,
-            1,
-            128,
-            None,
+            ctrls.new_int(
+                UserClassCtrl::Saturation as u32,
+                "Saturation",
+                0,
+                255,
+                1,
+                128,
+                None,
+            ),
         );
-        ctrls.new_int(UserClassCtrl::Hue as u32, "Hue", -128, 128, 1, 0, None);
-        ctrls.new_bool(UserClassCtrl::Autogain as u32, "Autogain", false, None);
-        ctrls.new_int(UserClassCtrl::Gain as u32, "Gain", 0, 255, 1, 128, None);
-        ctrls.new_bool(UserClassCtrl::Hflip as u32, "Horizontal Flip", false, None);
-        ctrls.new_bool(UserClassCtrl::Vflip as u32, "Vertical Flip", false, None);
-        ctrls.new_menu(
-            VividCtrl::TestPattern as u32,
-            "Test Pattern",
-            17,
-            0,
-            test_pattern_name,
-            None,
+        reg(
+            "Hue",
+            ctrls.new_int(UserClassCtrl::Hue as u32, "Hue", -128, 128, 1, 0, None),
         );
-        ctrls.new_bool(VividCtrl::Disconnect as u32, "Disconnect", false, None);
-        ctrls.new_bool(VividCtrl::DqbufError as u32, "DQBUF Error", false, None);
-        ctrls.new_bool(VividCtrl::QueueError as u32, "Queue Error", false, None);
-        ctrls.new_int(
-            VividCtrl::PercDropped as u32,
-            "Percentage Dropped",
-            0,
-            100,
-            1,
-            0,
-            None,
+        reg(
+            "Autogain",
+            ctrls.new_bool(UserClassCtrl::Autogain as u32, "Autogain", false, None),
         );
+        reg(
+            "Gain",
+            ctrls.new_int(UserClassCtrl::Gain as u32, "Gain", 0, 255, 1, 128, None),
+        );
+        reg(
+            "Hflip",
+            ctrls.new_bool(UserClassCtrl::Hflip as u32, "Horizontal Flip", false, None),
+        );
+        reg(
+            "Vflip",
+            ctrls.new_bool(UserClassCtrl::Vflip as u32, "Vertical Flip", false, None),
+        );
+        reg(
+            "TestPattern",
+            ctrls.new_menu(
+                VividCtrl::TestPattern as u32,
+                "Test Pattern",
+                TEST_PATTERN_NAMES.len() as u32,
+                0,
+                TEST_PATTERN_NAMES,
+                None,
+            ),
+        );
+        reg(
+            "Disconnect",
+            ctrls.new_bool(VividCtrl::Disconnect as u32, "Disconnect", false, None),
+        );
+        reg(
+            "DqbufError",
+            ctrls.new_bool(VividCtrl::DqbufError as u32, "DQBUF Error", false, None),
+        );
+        reg(
+            "QueueError",
+            ctrls.new_bool(VividCtrl::QueueError as u32, "Queue Error", false, None),
+        );
+        reg(
+            "PercDropped",
+            ctrls.new_int(
+                VividCtrl::PercDropped as u32,
+                "Percentage Dropped",
+                0,
+                100,
+                1,
+                0,
+                None,
+            ),
+        );
+        // 控件值变化事件由框架统一生成（S_CTRL / S_EXT_CTRLS 应用后触发）。
+        ctrls.set_change_notify(Box::new(move |ev| events.lock().push(ev)));
 
         Self {
             fmt_width: AtomicU32::new(640),
@@ -204,11 +249,12 @@ pub struct VividCapture {
 
 impl VividCapture {
     pub fn new() -> Self {
-        let state = Arc::new(VividCaptureState::new());
+        let events = Arc::new(ax_sync::Mutex::new(Vec::new()));
+        let state = Arc::new(VividCaptureState::new(Arc::clone(&events)));
         Self {
             state,
             queue: Vb2Queue::new(VirtualAllocator::new(), 2, 4),
-            events: Arc::new(ax_sync::Mutex::new(Vec::new())),
+            events,
         }
     }
 
@@ -449,34 +495,7 @@ impl IoctlOps for VividCapture {
         }
     }
 
-    // ── 控件 ─────────────────────────────────────────────────────
-
-    fn queryctrl(&self, q: &mut v4l2_core::interface::ctrl::QueryCtrl) -> v4l2_core::Result<()> {
-        self.state.ctrls.queryctrl(q)
-    }
-
-    fn g_ctrl(&self, ctrl: &mut Control) -> v4l2_core::Result<()> {
-        self.state.ctrls.g_ctrl(ctrl)
-    }
-
-    fn s_ctrl(&mut self, ctrl: &Control) -> v4l2_core::Result<()> {
-        // SAFETY: s_ctrl 需要 &mut 才能操作 CtrlHandler。在单线程内核中，
-        // ioctl 路径是唯一的写入者。
-        let state = unsafe { &mut *Arc::as_ptr(&self.state).cast_mut() };
-        let old_val = state.ctrls.find(ctrl.id).map(|cr| cr.value());
-        state.ctrls.s_ctrl(ctrl)?;
-        let new_val = state.ctrls.find(ctrl.id).map(|cr| cr.value());
-        if let (Some(old), Some(new)) = (old_val, new_val)
-            && old != new
-        {
-            // 控制变更事件（V4L2_EVENT_CTRL）：载荷由 CtrlHandler 填充
-            // （含 changes 位）；入队后由 glue 排空到 fh。
-            if let Some(ev) = state.ctrls.change_event(ctrl.id, CtrlChange::VALUE) {
-                self.events.lock().push(ev);
-            }
-        }
-        Ok(())
-    }
+    // ── 控件事件（控件查询 / G/S/TRY_EXT_CTRLS 由核心经 CtrlHandler 处理）──
 
     fn subscribe_event(
         &mut self,
@@ -484,10 +503,6 @@ impl IoctlOps for VividCapture {
         sub: &EventSubscription,
     ) -> v4l2_core::Result<()> {
         self.state.ctrls.subscribe_event(fh, sub)
-    }
-
-    fn querymenu(&self, q: &mut v4l2_core::interface::ctrl::Querymenu) -> v4l2_core::Result<()> {
-        self.state.ctrls.querymenu(q)
     }
 
     // ── 视频输入 ─────────────────────────────────────────────────
@@ -700,5 +715,9 @@ impl V4L2DriverOps for VividCapture {
         if q.num_buffers() > 0 {
             q.reqbufs(0, &[]).ok();
         }
+    }
+
+    fn ctrl_handler(&self) -> Option<&v4l2_core::ctrls::CtrlHandler> {
+        Some(&self.state.ctrls)
     }
 }

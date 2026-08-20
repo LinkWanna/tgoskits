@@ -5,7 +5,7 @@ extern crate std;
 #[macro_use]
 extern crate alloc;
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::anyhow;
@@ -345,7 +345,13 @@ impl<H: UvcHandle> UvcDevice<H> {
             device.vc_iface_num,
             &parsed.vc_units,
         );
-        info!("[UVC] registered {} controls", device.ctrls.count());
+        info!("[UVC] registered {} controls", device.ctrls.len());
+        // 控件值变化事件由框架统一生成（S_CTRL / S_EXT_CTRLS 应用后触发），
+        // 经驱动共享事件队列由 glue 排空到 fh。
+        let ev = Arc::clone(&device.events);
+        device
+            .ctrls
+            .set_change_notify(Box::new(move |event| ev.lock().push(event)));
 
         Ok(device)
     }

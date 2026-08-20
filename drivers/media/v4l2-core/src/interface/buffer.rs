@@ -1,9 +1,6 @@
 use bitflags::bitflags;
 
-use crate::interface::{
-    common::{BufType, Field, Memory, Timecode, Timeval},
-    format::Format,
-};
+use crate::interface::{BufType, Field, Memory, Timecode, Timeval, format::Format};
 
 bitflags! {
     #[repr(C)]

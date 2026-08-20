@@ -203,28 +203,6 @@ impl Default for V4l2Fh {
 
 // ── CTRL 事件载荷 ────────────────────────────────────────────
 
-impl EventCtrlPayload {
-    const BYTES: usize = core::mem::size_of::<Self>();
-
-    /// 从事件负载区读回前 `size_of::<EventCtrlPayload>()` 字节。
-    fn read_from(ev: &Event) -> Self {
-        let mut bytes = [0u8; Self::BYTES];
-        bytes.copy_from_slice(&ev.data[..Self::BYTES]);
-        // SAFETY: `EventCtrlPayload` 是 repr(C) 的 POD 结构，`bytes` 恰好
-        // 是其 `size_of` 字节的按位拷贝，transmute 得到合法值。
-        unsafe { core::mem::transmute(bytes) }
-    }
-
-    /// 按位写入目标字节区前 `size_of::<EventCtrlPayload>()` 字节。
-    fn write_into(&self, dst: &mut [u8]) {
-        debug_assert!(dst.len() >= Self::BYTES);
-        // SAFETY: `EventCtrlPayload` 是 repr(C) 的 POD 结构，与
-        // `[u8; size_of]` 等尺寸，按位重解释得到其字节表示。
-        let bytes: [u8; Self::BYTES] = unsafe { core::mem::transmute(*self) };
-        dst[..Self::BYTES].copy_from_slice(&bytes);
-    }
-}
-
 /// `v4l2_ctrl_replace`：用新事件载荷替换 `old`，并把旧 `changes` 按或合并。
 fn ctrl_replace(old: &mut Event, new: &Event) {
     let old_changes = EventCtrlPayload::read_from(old).changes;
@@ -243,13 +221,9 @@ fn ctrl_merge(old: &Event, new: &mut Event) {
 /// 构建 V4L2_EVENT_CTRL 事件所需的控件元数据与当前值。
 #[derive(Debug, Clone, Copy)]
 pub struct CtrlEventParams {
-    /// 控件 ID（CID）。
     pub id: u32,
-    /// 控件类型（`v4l2_ctrl_type`）。
     pub ctrl_type: u32,
-    /// 当前值。
     pub value: i64,
-    /// 控件标志位。
     pub flags: u32,
     pub minimum: i64,
     pub maximum: i64,
@@ -279,7 +253,7 @@ pub fn build_ctrl_event(params: CtrlEventParams, changes: CtrlChange) -> Event {
         data,
         pending: 0,
         sequence: 0,
-        timestamp: crate::interface::common::Timespec {
+        timestamp: crate::interface::Timespec {
             tv_sec: 0,
             tv_nsec: 0,
         },

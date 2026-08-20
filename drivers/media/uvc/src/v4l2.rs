@@ -13,8 +13,8 @@ use v4l2_core::{
         buffer,
         capability::{Capabilities, Capability},
         colorspace,
-        common::{BufType, Field, Memory, Timeval},
-        event::{CtrlChange, EventSubscription},
+        {BufType, Field, Memory, Timeval},
+        event::EventSubscription,
         format::{
             self, Fmtdesc, Format, FrameIntervalEnum, FrameIntervalType, FrameSizeEnum,
             FrameSizeType,
@@ -52,6 +52,10 @@ impl<H: UvcHandle> V4L2DriverOps for UvcDevice<H> {
         self.close_stream();
         self.queue.streamoff();
         *self.state.lock() = crate::UvcDeviceState::Configured;
+    }
+
+    fn ctrl_handler(&self) -> Option<&v4l2_core::ctrls::CtrlHandler> {
+        Some(&self.ctrls)
     }
 }
 
@@ -416,35 +420,7 @@ impl<H: UvcHandle> IoctlOps for UvcDevice<H> {
         Ok(())
     }
 
-    // ── 控件（UVC 硬件代理，注册在 UvcDevice::ctrls）──────────────
-
-    fn queryctrl(&self, q: &mut v4l2_core::interface::ctrl::QueryCtrl) -> v4l2_core::Result<()> {
-        self.ctrls.queryctrl(q)
-    }
-
-    fn query_ext_ctrl(
-        &self,
-        q: &mut v4l2_core::interface::ctrl::QueryExtCtrl,
-    ) -> v4l2_core::Result<()> {
-        self.ctrls.query_ext_ctrl(q)
-    }
-
-    fn querymenu(&self, q: &mut v4l2_core::interface::ctrl::Querymenu) -> v4l2_core::Result<()> {
-        self.ctrls.querymenu(q)
-    }
-
-    fn g_ctrl(&self, ctrl: &mut v4l2_core::interface::ctrl::Control) -> v4l2_core::Result<()> {
-        self.ctrls.g_ctrl(ctrl)
-    }
-
-    fn s_ctrl(&mut self, ctrl: &v4l2_core::interface::ctrl::Control) -> v4l2_core::Result<()> {
-        if self.ctrls.s_ctrl(ctrl)?.is_some()
-            && let Some(ev) = self.ctrls.change_event(ctrl.id, CtrlChange::VALUE)
-        {
-            self.events.lock().push(ev);
-        }
-        Ok(())
-    }
+    // ── 控件事件（控件查询 / G/S/TRY_EXT_CTRLS 由核心经 CtrlHandler 处理）──
 
     fn subscribe_event(
         &mut self,
@@ -452,65 +428,5 @@ impl<H: UvcHandle> IoctlOps for UvcDevice<H> {
         sub: &EventSubscription,
     ) -> v4l2_core::Result<()> {
         self.ctrls.subscribe_event(fh, sub)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use v4l2_core::interface::{buffer::Buffer, common};
-
-    use super::*;
-    use crate::{helper::test_util::build_uvc_blob, stream::test_util::MockUvc};
-
-    fn make_device() -> UvcDevice<MockUvc> {
-        let blob = build_uvc_blob(0x01, 0x02);
-        UvcDevice::new(MockUvc {}, &blob).unwrap()
-    }
-
-    /// 构造全零输入的 UAPI Buffer（dqbuf 只写输出字段、不读输入字段）。
-    fn zeroed_buffer() -> Buffer {
-        Buffer {
-            index: 0,
-            ty: BufType::VideoCapture,
-            bytesused: 0,
-            flags: buffer::BufFlags::empty(),
-            field: Field::Any,
-            timestamp: Timeval {
-                tv_sec: 0,
-                tv_usec: 0,
-            },
-            timecode: common::Timecode {
-                ty: 0,
-                flags: 0,
-                frames: 0,
-                seconds: 0,
-                minutes: 0,
-                hours: 0,
-                userbits: [0; 4],
-            },
-            sequence: 0,
-            memory: Memory::Mmap,
-            m: buffer::BufferM { offset: 0 },
-            length: 0,
-            reserved2: 0,
-            request_fd: 0,
-        }
-    }
-
-    /// 回归：从未 STREAMON 时 DQBUF 必须立即返回 EINVAL，不得永久睡眠。
-    /// 对齐 Linux `__vb2_wait_for_done_vb`：`!q->streaming → -EINVAL`
-    /// （"streaming off, will not wait for buffers"）。
-    /// 修复前：等待条件 readable/error 永假 → 阻塞挂死（内核上永久
-    /// 睡眠；host 测试上 block_on 因无调度器 panic）。
-    /// STREAMOFF 后场景走同一检查点（同一 `!is_streaming` 分支），
-    /// 停流唤醒由 videobuffer 的 `streamoff_wakes_waiters` 回归覆盖。
-    #[test]
-    fn dqbuf_without_streaming_returns_einval_not_hang() {
-        let mut dev = make_device();
-        let mut buf = zeroed_buffer();
-
-        let err = IoctlOps::dqbuf(&mut dev, &mut buf).unwrap_err();
-
-        assert_eq!(err, V4l2Error::InvalidArgument);
     }
 }

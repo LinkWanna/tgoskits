@@ -6,7 +6,7 @@
 
 use bitflags::bitflags;
 
-use crate::interface::common::Fract;
+use crate::interface::Fract;
 
 /// 逐行/隔行 — `V4L2_DV_*`。
 #[repr(u32)]

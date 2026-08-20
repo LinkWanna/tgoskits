@@ -7,7 +7,7 @@ use v4l2_core::{
     error::V4l2Error,
     interface::{
         colorspace::{Colorspace, Quantization, XferFunc, YcbcrEncoding},
-        common::Field,
+        Field,
         format::{FmtFlag, Fmtdesc, Format},
     },
 };

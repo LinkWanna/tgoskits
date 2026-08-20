@@ -2,7 +2,7 @@
 
 use bitflags::bitflags;
 
-use crate::interface::common::{BufType, Fract};
+use crate::interface::{BufType, Fract};
 
 bitflags! {
     /// 流参数能力标志。

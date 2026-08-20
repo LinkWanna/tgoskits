@@ -18,7 +18,7 @@ use v4l2_core::{
         ctrl::{ExtControl, ExtControls},
         event::Event,
     },
-    ioctl::IoctlCmd,
+    ioctl::{IoctlCmd, VideoIoctl},
 };
 
 use crate::{
@@ -104,10 +104,7 @@ impl DeviceOps for V4l2DevNode {
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
-        // 未知命令：不解析 arg 直接 ENOTTY——对齐 Linux video_ioctl2 对未知
-        // ioctl 的行为（v4l2-compliance invalid ioctl 测试传 nullptr arg，
-        // 先读 arg 会 EFAULT 而非 ENOTTY）。
-        let Some(ioctl_cmd) = IoctlCmd::try_from_u32(cmd) else {
+        let Some(ioctl) = VideoIoctl::try_from_u32(cmd) else {
             return Err(VfsError::from(StarryError::NotATty));
         };
 
@@ -127,58 +124,64 @@ impl DeviceOps for V4l2DevNode {
             .collect();
 
         // ── 扩展控件：需要从用户空间读取 payload ──
-        match ioctl_cmd {
-            IoctlCmd::GExtCtrls | IoctlCmd::SExtCtrls | IoctlCmd::TryExtCtrls => {
-                // 从已复制的参数缓冲中读取头
-                let header: ExtControls =
-                    unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const ExtControls) };
-                let ec_count = header.count as usize;
-                let ec_size = core::mem::size_of::<ExtControl>();
-                let payload_size = ec_count * ec_size;
-                if payload_size > 0 {
-                    // 从用户空间将控件数组读入堆缓冲。
-                    let mut payload_uninit: Vec<MaybeUninit<u8>> =
-                        vec![MaybeUninit::uninit(); payload_size];
-                    vm_read_slice(header.controls as *const u8, &mut payload_uninit)
-                        .map_err(vm_to_vfs)?;
-                    let mut payload: Vec<u8> = payload_uninit
-                        .into_iter()
-                        .map(|v| unsafe { v.assume_init() })
-                        .collect();
+        if let VideoIoctl::Modern(ioctl_cmd) = ioctl {
+            match ioctl_cmd {
+                IoctlCmd::GExtCtrls | IoctlCmd::SExtCtrls | IoctlCmd::TryExtCtrls => {
+                    // 从已复制的参数缓冲中读取头
+                    let mut header: ExtControls =
+                        unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const ExtControls) };
+                    let ec_count = header.count as usize;
+                    let ec_size = core::mem::size_of::<ExtControl>();
+                    let payload_size = ec_count * ec_size;
+                    if payload_size > 0 {
+                        // 从用户空间将控件数组读入堆缓冲。
+                        let mut payload_uninit: Vec<MaybeUninit<u8>> =
+                            vec![MaybeUninit::uninit(); payload_size];
+                        vm_read_slice(header.controls as *const u8, &mut payload_uninit)
+                            .map_err(vm_to_vfs)?;
+                        let mut payload: Vec<u8> = payload_uninit
+                            .into_iter()
+                            .map(|v| unsafe { v.assume_init() })
+                            .collect();
 
-                    let result = match ioctl_cmd {
-                        IoctlCmd::GExtCtrls => dev.handle_g_ext_ctrls(&header, &mut payload),
-                        IoctlCmd::SExtCtrls => dev.handle_s_ext_ctrls(&header, &payload),
-                        IoctlCmd::TryExtCtrls => dev.handle_try_ext_ctrls(&header, &payload),
-                        _ => unreachable!(),
-                    };
+                        let result = match ioctl_cmd {
+                            IoctlCmd::GExtCtrls => {
+                                dev.handle_g_ext_ctrls(&mut header, &mut payload)
+                            }
+                            IoctlCmd::SExtCtrls => {
+                                dev.handle_s_ext_ctrls(&mut header, &mut payload)
+                            }
+                            IoctlCmd::TryExtCtrls => {
+                                dev.handle_try_ext_ctrls(&mut header, &mut payload)
+                            }
+                            _ => unreachable!(),
+                        };
 
-                    match result {
-                        Ok(()) => {
-                            // 为 G_EXT_CTRLS 回写控件数组
-                            if ioctl_cmd == IoctlCmd::GExtCtrls {
+                        match result {
+                            Ok(()) => {
+                                // G/S/TRY 均回写控件数组（值可能被取整 / clamp）。
                                 vm_write_slice(header.controls as *mut u8, &payload)
                                     .map_err(vm_to_vfs)?;
+                                // 同时回写头（error_idx / which 可能被设置）
+                                let header_bytes = unsafe {
+                                    core::slice::from_raw_parts(
+                                        &header as *const ExtControls as *const u8,
+                                        core::mem::size_of::<ExtControls>(),
+                                    )
+                                };
+                                vm_write_slice(arg as *mut u8, header_bytes).map_err(vm_to_vfs)?;
+                                self.drain_events(&mut dev);
+                                return Ok(0);
                             }
-                            // 同时回写头（error_idx 可能被设置）
-                            let header_bytes = unsafe {
-                                core::slice::from_raw_parts(
-                                    &header as *const ExtControls as *const u8,
-                                    ec_size,
-                                )
-                            };
-                            vm_write_slice(arg as *mut u8, header_bytes).map_err(vm_to_vfs)?;
-                            self.drain_events(&mut dev);
-                            return Ok(0);
+                            Err(e) => return Err(VfsError::from(v4l2_to_starry_error(e))),
                         }
-                        Err(e) => return Err(VfsError::from(v4l2_to_starry_error(e))),
                     }
                 }
+                _ => {}
             }
-            _ => {}
         }
 
-        match dev.handle_ioctl(cmd, &mut buf[..size]) {
+        match dev.handle_ioctl(ioctl, &mut buf[..size]) {
             Ok(()) => {
                 if size > 0 {
                     vm_write_slice(arg as *mut u8, &buf[..size]).map_err(vm_to_vfs)?;
@@ -232,28 +235,16 @@ impl Pollable for V4l2DevNode {
     }
 
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        // 注册到驱动（vb2 队列）的完成唤醒源：数据就绪（buffer_done）或
-        // 队列错误（set_error）时唤醒。vivid（帧预填充）通常 poll 立即 IN，
-        // 不挂起；UVC（IRQ 异步到帧）依赖此注册，否则 select/poll 挂到超时。
-        // 框架在 register 后会重新 poll（io_mpx/poll.rs），无丢失唤醒。
         let Some(poll_rx) = &self.poll_rx else {
-            // 设备无异步完成路径：立即唤醒让框架重查电平。
             context.waker().wake_by_ref();
             return;
         };
         let interests = events & (IoEvents::IN | IoEvents::ERR);
         if !interests.is_empty() {
-            // SAFETY: register 从任务上下文（poll 路径）调用，且不持设备锁，
-            // 满足 PollSet 约束。
-            unsafe { poll_rx.register(context.waker(), interests) };
+            unsafe { poll_rx.register(context.waker(), interests) }
         }
-        // 事件唤醒源：新事件入队（含 SEND_INITIAL）后唤醒 POLLPRI 等待者。
         if !(events & IoEvents::PRI).is_empty() {
-            // SAFETY: 同上——任务上下文调用、不持设备锁。
-            unsafe {
-                self.event_poll_rx
-                    .register(context.waker(), IoEvents::PRI);
-            }
+            unsafe { self.event_poll_rx.register(context.waker(), IoEvents::PRI) }
         }
     }
 }
@@ -265,9 +256,6 @@ fn ioctl_arg_size(cmd: u32) -> usize {
 }
 
 /// 将 V4L2 错误映射为 StarryOS 错误。
-///
-/// 唯一的 V4l2Error → 内核错误映射点（v4l2-core 内部不再维护 errno 表）。
-/// StarryError → Linux errno 的最终转换由内核错误基础设施完成。
 fn v4l2_to_starry_error(e: V4l2Error) -> StarryError {
     match e {
         V4l2Error::InvalidArgument => StarryError::InvalidInput,

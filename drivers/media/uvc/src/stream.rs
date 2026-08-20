@@ -11,7 +11,7 @@ use core::{
 };
 
 use crab_usb::usb_if::err::USBError;
-use v4l2_core::interface::common::Field;
+use v4l2_core::interface::Field;
 use videobuffer::{BufferState, Vb2MemOps, Vb2Queue};
 
 use crate::frame::FrameParser;
@@ -42,31 +42,16 @@ pub trait IsoStreamHandle: Send + Sync {
 /// UVC 采集 trace——worker 任务侧更新无锁原子，close 时读取打印。
 #[derive(Debug, Default)]
 pub(crate) struct UvcTrace {
-    /// 完成批数。
     pub(crate) batches: AtomicU64,
-    /// 携带 ERR 标志的 UVC 包计数。
     pub(crate) err_packets: AtomicU64,
-    /// 完成帧数（buffer_done）。
     pub(crate) frames_done: AtomicU64,
-    /// 非零 actuals 槽总数（÷batches = 每批平均有效槽数——读取健康度）。
     pub(crate) slots_with_data: AtomicU64,
-    /// 收到的有效载荷字节总数（÷batches = 每批平均字节——数据率健康度）。
     pub(crate) bytes_received: AtomicU64,
-    /// 首个非零槽批序号（×8ms = armed 后首批有效数据延迟——传输侧启动）。
     pub(crate) first_data_batch: AtomicU64,
-    /// 首帧完成批序号（×8ms = 帧边界建立延迟）。
     pub(crate) first_frame_batch: AtomicU64,
 }
 
 /// 跨批捕获会话：帧解析器 + 当前帧的目标缓冲。
-///
-/// `dest` 在**整帧期间保持**（跨 8ms 批），只有帧事件（EOF/FID 翻转）消费后
-/// 才换新。若每个批开头重取目标（`take_active` 返回索引最小的 Active 缓冲），
-/// 用户态在帧中途 requeue 低索引缓冲后，在飞帧会被拆进两个缓冲、EOF 时
-/// `buffer_done` 标记错误的缓冲——板上实测下一帧文件 = 上一帧头 + 当前帧尾
-/// 的拼接（test1.jpg 前 4896 字节与 test0.jpg 相同）。
-///
-/// 由流 worker 独占持有（无锁）；STREAMON 创建、STREAMOFF join 后丢弃。
 pub(crate) struct CaptureSession {
     pub(crate) parser: FrameParser,
     pub(crate) dest: Option<(u32, usize, usize)>,
@@ -82,11 +67,6 @@ impl CaptureSession {
 }
 
 /// 拼帧一批完成的 ISO 数据（任务上下文——流 worker 每批调用一次）。
-///
-/// 会话状态（[`CaptureSession`]）由调用方（worker）独占持有、跨批保持；
-/// 无 Active vb2 缓冲时整帧丢弃（对齐 Linux uvcvideo 无缓冲不取数据），
-/// 绝不从流中间产出半帧。完成唤醒由 `Vb2Queue::buffer_done` 内建（DQBUF
-/// 阻塞与 poll 共用），此处不做任何通知。`trace` 只更新无锁原子。
 pub(crate) fn process_iso_batch<M: Vb2MemOps>(
     session: &mut CaptureSession,
     queue: &Vb2Queue<M>,

@@ -16,11 +16,11 @@ use crate::{
     Result, V4l2Error,
     filehandler::V4l2Fh,
     interface::{
+        BufType,
         buffer::{Buffer, CreateBuffers, Exportbuffer, RemoveBuffers, Requestbuffers},
         capability::Capability,
-        common::BufType,
         crop::{Crop, Cropcap, Selection},
-        ctrl::{Control, QueryCtrl, QueryExtCtrl, Querymenu},
+        ctrl::Control,
         dv::{DvTimings, DvTimingsCap, EnumDvTimings},
         edid::Edid,
         event::{Event, EventSubscription},
@@ -160,28 +160,6 @@ pub trait IoctlOps {
         Err(V4l2Error::NotSupported)
     }
 
-    // ── 控制 ─────────────────────────────────────────────────────
-
-    fn queryctrl(&self, q: &mut QueryCtrl) -> Result<()> {
-        Err(V4l2Error::NotSupported)
-    }
-
-    fn query_ext_ctrl(&self, q: &mut QueryExtCtrl) -> Result<()> {
-        Err(V4l2Error::NotSupported)
-    }
-
-    fn g_ctrl(&self, c: &mut Control) -> Result<()> {
-        Err(V4l2Error::NotSupported)
-    }
-
-    fn s_ctrl(&mut self, c: &Control) -> Result<()> {
-        Err(V4l2Error::NotSupported)
-    }
-
-    fn querymenu(&self, q: &mut Querymenu) -> Result<()> {
-        Err(V4l2Error::NotSupported)
-    }
-
     // ── 裁剪 / Selection ─────────────────────────────────────────
 
     fn cropcap(&self, c: &mut Cropcap) -> Result<()> {
@@ -237,12 +215,6 @@ pub trait IoctlOps {
     // ── 事件 ────────────────────────────────────────────────────────
 
     /// 处理 `VIDIOC_SUBSCRIBE_EVENT`。
-    ///
-    /// 驱动决定支持的事件类型并调用 [`V4l2Fh::subscribe`]（或
-    /// [`crate::ctrls::CtrlHandler::subscribe_event`] 订阅 CTRL 事件）。
-    /// 默认实现拒绝所有类型（`NotSupported`）——不支持事件的设备
-    /// 的订阅必须失败，对齐 Linux 未实现 `vidioc_subscribe_event` 的
-    /// 驱动（v4l2-compliance 以订阅失败判定该事件类型不存在）。
     fn subscribe_event(&mut self, _fh: &mut V4l2Fh, _sub: &EventSubscription) -> Result<()> {
         Err(V4l2Error::NotSupported)
     }
@@ -254,18 +226,33 @@ pub trait IoctlOps {
     }
 
     /// 处理 `VIDIOC_DQEVENT`（非阻塞）。
-    ///
-    /// 无待处理事件时返回 `NoEntry`（ENOENT），对齐 Linux 非阻塞
-    /// `v4l2_event_dequeue`。
     fn dqevent(&mut self, fh: &mut V4l2Fh, event: &mut Event) -> Result<()> {
         *event = fh.dequeue()?;
         Ok(())
     }
 }
 
-/// 遗留 V4L2 ioctl 驱动的 trait（34 个，默认全部返回 `NotSupported`）。
+/// 遗留 V4L2 ioctl 驱动的 trait（36 个，默认全部返回 `NotSupported`）。
 #[allow(unused_variables)]
 pub trait LegacyIoctlOps {
+    // ── 弃用控件（G_CTRL / S_CTRL）──────────────────────────────
+
+    /// 处理 `VIDIOC_G_CTRL`（弃用）。
+    ///
+    /// 驱动不再实现该方法；核心层经 [`crate::driver::V4L2DriverOps::ctrl_handler`]
+    /// 统一处理。此处默认返回 `NotSupported`，仅作为遗留分发兜底。
+    fn g_ctrl(&self, _c: &mut Control) -> Result<()> {
+        Err(V4l2Error::NotSupported)
+    }
+
+    /// 处理 `VIDIOC_S_CTRL`（弃用）。
+    ///
+    /// 驱动不再实现该方法；核心层经 [`crate::driver::V4L2DriverOps::ctrl_handler`]
+    /// 统一处理。此处默认返回 `NotSupported`，仅作为遗留分发兜底。
+    fn s_ctrl(&mut self, _c: &Control) -> Result<()> {
+        Err(V4l2Error::NotSupported)
+    }
+
     // ── Overlay 帧缓冲 ─────────────────────────────────────────
 
     fn g_fbuf(&self, fb: &mut Framebuffer) -> Result<()> {

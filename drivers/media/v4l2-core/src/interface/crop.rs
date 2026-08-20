@@ -4,7 +4,7 @@
 
 use bitflags::bitflags;
 
-use crate::interface::common::{Fract, Rect};
+use crate::interface::{Fract, Rect};
 
 /// 裁剪能力。
 #[repr(C)]

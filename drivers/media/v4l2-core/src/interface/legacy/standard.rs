@@ -3,7 +3,7 @@
 //! 模拟电视标准接口（G/S_STD、ENUMSTD、QUERYSTD）属于模拟电视时代；
 //! 现代 HDMI/DP 设备改用 DV timings 接口。
 
-use crate::interface::{common::Fract, inout::StdId};
+use crate::interface::{Fract, inout::StdId};
 
 /// 视频标准描述。
 #[repr(C)]

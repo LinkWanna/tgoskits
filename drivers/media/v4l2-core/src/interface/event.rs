@@ -5,7 +5,7 @@
 
 use bitflags::bitflags;
 
-use crate::interface::common::Timespec;
+use crate::interface::Timespec;
 
 /// V4L2 事件订阅请求。
 #[repr(C)]
@@ -22,9 +22,6 @@ pub struct EventSubscription {
 #[derive(Debug, Clone, Copy)]
 pub struct Event {
     pub ty: u32, // [out] 事件类型
-    /// ABI 对齐填充：C 的 `union v4l2_event.u` 因含 `v4l2_event_ctrl`（带
-    /// `__s64 value64`）而按 8 字节对齐，实际位于偏移 8；`[u8; 64]` 单独只有
-    /// 1 字节对齐，需显式补 4 字节使 `data` 落在偏移 8（经 C 头 offsetof 验证）。
     pub pad: u32,
     pub data: [u8; 64],      // [out] 事件负载（union v4l2_event.u，偏移 8）
     pub pending: u32,        // [out] 该类型的待处理事件数量
@@ -92,6 +89,24 @@ pub struct EventCtrlPayload {
     pub maximum: i32,
     pub step: i32,
     pub default_value: i32,
+}
+
+impl EventCtrlPayload {
+    const BYTES: usize = core::mem::size_of::<Self>();
+
+    /// 从事件负载区读回前 `size_of::<EventCtrlPayload>()` 字节。
+    pub fn read_from(ev: &Event) -> Self {
+        let mut bytes = [0u8; Self::BYTES];
+        bytes.copy_from_slice(&ev.data[..Self::BYTES]);
+        unsafe { core::mem::transmute(bytes) }
+    }
+
+    /// 按位写入目标字节区前 `size_of::<EventCtrlPayload>()` 字节。
+    pub fn write_into(&self, dst: &mut [u8]) {
+        debug_assert!(dst.len() >= Self::BYTES);
+        let bytes: [u8; Self::BYTES] = unsafe { core::mem::transmute(*self) };
+        dst[..Self::BYTES].copy_from_slice(&bytes);
+    }
 }
 
 bitflags! {

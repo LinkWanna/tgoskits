@@ -754,6 +754,6 @@ mod tests {
             pattern_from_index(8),
             Some(Pattern::Solid(0, 0, 255))
         ));
-        assert!(matches!(pattern_from_index(99), None));
+        assert!(pattern_from_index(99).is_none());
     }
 }

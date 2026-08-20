@@ -11,13 +11,14 @@ use axpoll::{IoEvents, PollSet};
 
 use crate::{
     Result, V4l2Error,
+    ctrls::handler::CtrlHandler,
     driver::V4L2DriverOps,
     filehandler::V4l2Fh,
     interface::{
-        ctrl::{Control, ExtControl, ExtControls},
+        ctrl::{ExtControl, ExtControls},
         event::{Event, EventSubscription},
     },
-    ioctl::IoctlDispatcher,
+    ioctl::{IoctlCmd, IoctlDispatcher, VideoIoctl},
 };
 
 /// V4L2 视频设备——对应 Linux 的 `struct video_device`。
@@ -54,11 +55,8 @@ impl VideoDevice {
     }
 
     /// 处理来自用户空间的 ioctl。
-    pub fn handle_ioctl(&mut self, cmd: u32, arg: &mut [u8]) -> Result<()> {
-        // 拦截事件 ioctl——它们作用于 fh，并路由到驱动回调（Linux
-        // `vidioc_subscribe_event`/`vidioc_dqevent`）。
-        use crate::ioctl::IoctlCmd;
-        if let Some(c) = IoctlCmd::try_from_u32(cmd) {
+    pub fn handle_ioctl(&mut self, cmd: VideoIoctl, arg: &mut [u8]) -> Result<()> {
+        if let VideoIoctl::Modern(c) = cmd {
             match c {
                 IoctlCmd::SubscribeEvent => {
                     let sub: EventSubscription = unsafe { crate::ioctl::read_from_bytes(arg) };
@@ -189,51 +187,59 @@ impl VideoDevice {
     // ── 扩展控件 ────────────────────────────────────────────────
 
     /// 处理 `VIDIOC_G_EXT_CTRLS`——读取当前值。
-    pub fn handle_g_ext_ctrls(&self, header: &ExtControls, ctrl_array: &mut [u8]) -> Result<()> {
-        let ec_size = core::mem::size_of::<ExtControl>();
-        let driver = self.driver.lock();
-        for i in 0..header.count as usize {
-            let offset = i * ec_size;
-            let ec = unsafe { &mut *(ctrl_array.as_mut_ptr().add(offset) as *mut ExtControl) };
-            let mut c = Control {
-                id: ec.id,
-                value: 0,
-            };
-            driver.g_ctrl(&mut c)?;
-            ec.value.value = c.value;
-        }
-        Ok(())
+    pub fn handle_g_ext_ctrls(&self, header: &mut ExtControls, payload: &mut [u8]) -> Result<()> {
+        self.handle_ext_ctrls(header, payload, CtrlHandler::g_ext_ctrls)
     }
 
     /// 处理 `VIDIOC_S_EXT_CTRLS`——设置值。
-    pub fn handle_s_ext_ctrls(&mut self, _header: &ExtControls, ctrl_array: &[u8]) -> Result<()> {
-        let ec_size = core::mem::size_of::<ExtControl>();
-        let mut driver = self.driver.lock();
-        for i in 0.._header.count as usize {
-            let offset = i * ec_size;
-            let ec = unsafe { &*(ctrl_array.as_ptr().add(offset) as *const ExtControl) };
-            let c = Control {
-                id: ec.id,
-                value: unsafe { ec.value.value },
-            };
-            driver.s_ctrl(&c)?;
-        }
-        Ok(())
+    pub fn handle_s_ext_ctrls(&self, header: &mut ExtControls, payload: &mut [u8]) -> Result<()> {
+        self.handle_ext_ctrls(header, payload, CtrlHandler::s_ext_ctrls)
     }
 
-    /// 处理 `VIDIOC_TRY_EXT_CTRLS`——只校验不应用。
-    ///
-    /// 没有驱动实现真正的 try 语义（无副作用地校验），
-    /// 而旧的先设置再恢复的回退方案会改动
-    /// volatile/有副作用的控件——因此这里返回 `NotSupported`
-    /// （Linux 允许：`vidioc_try_ext_ctrls` 是可选的；错误码经
-    /// `v4l2_to_axerror` 映射为 ENOTTY，与 video_ioctl2 对未实现回调
-    /// 的行为一致）。不要再恢复先设置再恢复的 hack。
-    pub fn handle_try_ext_ctrls(
-        &mut self,
-        _header: &ExtControls,
-        _ctrl_array: &[u8],
-    ) -> Result<()> {
-        Err(V4l2Error::NotSupported)
+    /// 处理 `VIDIOC_TRY_EXT_CTRLS`——只校验并回写校验后的值，不应用。
+    pub fn handle_try_ext_ctrls(&self, header: &mut ExtControls, payload: &mut [u8]) -> Result<()> {
+        self.handle_ext_ctrls(header, payload, CtrlHandler::try_ext_ctrls)
     }
+
+    /// `G/S/TRY_EXT_CTRLS` 共用路径：payload 解析 → `CtrlHandler` 处理 → 写回。
+    fn handle_ext_ctrls(
+        &self,
+        header: &mut ExtControls,
+        payload: &mut [u8],
+        op: impl FnOnce(&CtrlHandler, &mut ExtControls, &mut [ExtControl]) -> Result<()>,
+    ) -> Result<()> {
+        let mut controls = parse_ext_controls(payload)?;
+        let driver = self.driver.lock();
+        let handler = driver.ctrl_handler().ok_or(V4l2Error::NotSupported)?;
+        op(handler, header, &mut controls)?;
+        write_ext_controls(payload, &controls);
+        Ok(())
+    }
+}
+
+/// 把 payload 字节区按位重解释为 `ExtControl` 切片并拷贝为 `Vec`。
+fn parse_ext_controls(payload: &[u8]) -> Result<Vec<ExtControl>> {
+    let ec_size = core::mem::size_of::<ExtControl>();
+    if !payload.len().is_multiple_of(ec_size) {
+        return Err(V4l2Error::InvalidArgument);
+    }
+    // SAFETY: `payload` 长度是 `ExtControl` 大小的整数倍；`ExtControl` 为
+    // repr(C) POD（Copy），按位重解释为切片不产生未初始化值。
+    let src = unsafe {
+        core::slice::from_raw_parts(
+            payload.as_ptr() as *const ExtControl,
+            payload.len() / ec_size,
+        )
+    };
+    Ok(src.to_vec())
+}
+
+/// 把 `ExtControl` 切片写回 payload 字节区（`payload` 长度必须与项数匹配）。
+fn write_ext_controls(payload: &mut [u8], controls: &[ExtControl]) {
+    debug_assert!(payload.len() == core::mem::size_of_val(controls));
+    // SAFETY: 同上；调用方保证 `payload` 长度与 `controls` 项数匹配。
+    let dst = unsafe {
+        core::slice::from_raw_parts_mut(payload.as_mut_ptr() as *mut ExtControl, controls.len())
+    };
+    dst.copy_from_slice(controls);
 }

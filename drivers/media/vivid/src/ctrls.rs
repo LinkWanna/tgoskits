@@ -76,27 +76,24 @@ pub enum VividCtrl {
     TestPattern         = 0x00980930,
 }
 
-/// 按名称查找 `VividCtrl::TestPattern` 菜单项。
-pub fn test_pattern_name(idx: u32) -> Option<&'static str> {
-    Some(match idx {
-        0 => "75% Colorbar",
-        1 => "100% Colorbar",
-        2 => "CSC Colorbar",
-        3 => "Horizontal 100% Colorbar",
-        4 => "100% Color Squares",
-        5 => "Black",
-        6 => "White",
-        7 => "Red",
-        8 => "Green (Red/Blue Off)",
-        9 => "Blue",
-        10 => "Alternating Hor. Lines",
-        11 => "Alternating Vert. Lines",
-        12 => "Cross 1-pixel",
-        13 => "Cross 2-pixels",
-        14 => "Checkers 16x16",
-        15 => "Checkers 2x2",
-        16 => "Checkers 1x1",
-        17 => "Color Checker 16x16",
-        _ => return None,
-    })
-}
+/// `VividCtrl::TestPattern` 菜单项（索引 → 名称）。
+pub const TEST_PATTERN_NAMES: &[&str] = &[
+    "75% Colorbar",
+    "100% Colorbar",
+    "CSC Colorbar",
+    "Horizontal 100% Colorbar",
+    "100% Color Squares",
+    "Black",
+    "White",
+    "Red",
+    "Green (Red/Blue Off)",
+    "Blue",
+    "Alternating Hor. Lines",
+    "Alternating Vert. Lines",
+    "Cross 1-pixel",
+    "Cross 2-pixels",
+    "Checkers 16x16",
+    "Checkers 2x2",
+    "Checkers 1x1",
+    "Color Checker 16x16",
+];

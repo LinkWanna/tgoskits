@@ -6,8 +6,8 @@
 use bitflags::bitflags;
 
 use crate::interface::{
+    BufType, Field, Fract, Rect,
     colorspace::{Colorspace, Quantization, XferFunc, YcbcrEncoding},
-    common::{BufType, Field, Fract, Rect},
 };
 
 // ========================================================================

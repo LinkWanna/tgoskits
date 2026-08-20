@@ -11,8 +11,8 @@ pub mod error;
 pub mod filehandler;
 pub mod interface;
 pub mod ioctl;
-pub mod uapi;
 
+pub use ctrls::{CtrlOps, handler::CtrlHandler};
 pub use driver::V4L2DriverOps;
 pub use error::{Result, V4l2Error};
-pub use ioctl::{IoctlCmd, IoctlOps, LegacyIoctlCmd, LegacyIoctlOps};
+pub use ioctl::{IoctlCmd, IoctlOps, LegacyIoctlCmd, LegacyIoctlOps, VideoIoctl};

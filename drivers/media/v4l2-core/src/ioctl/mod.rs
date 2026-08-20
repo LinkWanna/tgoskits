@@ -6,9 +6,9 @@
 //! [`IoctlOps`]（modern）或 [`LegacyIoctlOps`]（遗留）回调。
 //!
 //! 全部 83 个 VIDIOC 命令按 Linux 历史划分为：
-//! - **modern**：现代驱动仍实现的活动接口（49 个，[`IoctlCmd`]）
+//! - **modern**：现代驱动仍实现的活动接口（47 个，[`IoctlCmd`]）
 //! - **legacy**：实质废弃、新设备不再实现或不再需要驱动实现的接口
-//!   （34 个，[`LegacyIoctlCmd`]）
+//!   （36 个，[`LegacyIoctlCmd`]，含弃用的 G/S_CTRL）
 
 mod ops;
 
@@ -20,9 +20,9 @@ use crate::{
     V4l2Error,
     driver::V4L2DriverOps,
     interface::{
+        BufType,
         buffer::{Buffer, CreateBuffers, Exportbuffer, RemoveBuffers, Requestbuffers},
         capability::Capability,
-        common::BufType,
         crop::{Crop, Cropcap, Selection},
         ctrl::{Control, ExtControls, QueryCtrl, QueryExtCtrl, Querymenu},
         dv::{DvTimings, DvTimingsCap, EnumDvTimings},
@@ -114,7 +114,7 @@ macro_rules! ioctl_defs {
     (@val iowr, $nr:expr, $ty:ty) => { iowr($nr, core::mem::size_of::<$ty>() as u32) };
 }
 
-// 现代 V4L2 ioctl 命令（49 个）。
+// 现代 V4L2 ioctl 命令（47 个）。
 ioctl_defs!(
     IoctlCmd,
     // ── 查询与枚举 ──────────────────────────────────────────
@@ -154,8 +154,6 @@ ioctl_defs!(
     // ── 控制 ─────────────────────────────────────────────────────
     (QueryCtrl, iowr, 36, QueryCtrl),
     (QueryExtCtrl, iowr, 103, QueryExtCtrl),
-    (GCtrl, iowr, 27, Control),
-    (SCtrl, iowr, 28, Control),
     (GExtCtrls, iowr, 71, ExtControls),
     (SExtCtrls, iowr, 72, ExtControls),
     (TryExtCtrls, iowr, 73, ExtControls),
@@ -181,9 +179,12 @@ ioctl_defs!(
     (UnsubscribeEvent, iow, 91, EventSubscription),
 );
 
-// 遗留 V4L2 ioctl 命令（34 个）
+// 遗留 V4L2 ioctl 命令（36 个）
 ioctl_defs!(
     LegacyIoctlCmd,
+    // ── G/S_CTRL ───────
+    (GCtrl, iowr, 27, Control),
+    (SCtrl, iowr, 28, Control),
     // ── Overlay 帧缓冲 ──────────────────────────────────────
     (GFbuf, ior, 10, Framebuffer),
     (SFbuf, iow, 11, Framebuffer),
@@ -250,6 +251,7 @@ ioctl_defs!(
 ///
 /// 模式：
 /// - `rw`：读 `ty` → `ops.method(&mut v)?` → 写回（IOWR/IOR）
+/// - `rw_ctrl`：读 `ty` → 经 `ops.ctrl_handler()` 处理 → 写回（控件 ioctl）
 /// - `wo`：读 `ty` → `ops.method(&v)`（IOW，不回写）
 /// - `get`：`ops.method()?` 返回标量 → 写回
 /// - `val`：读标量 `ty` → `ops.method(v)`（按值传递）
@@ -259,6 +261,13 @@ macro_rules! ioctl_body {
     (rw, $ops:ident, $arg:ident, $method:ident, $ty:ty) => {{
         let mut v: $ty = read_from_bytes($arg);
         $ops.$method(&mut v)?;
+        write_to_bytes($arg, &v);
+        Ok(())
+    }};
+    (rw_ctrl, $ops:ident, $arg:ident, $method:ident, $ty:ty) => {{
+        let mut v: $ty = read_from_bytes($arg);
+        let handler = $ops.ctrl_handler().ok_or(V4l2Error::NotSupported)?;
+        handler.$method(&mut v)?;
         write_to_bytes($arg, &v);
         Ok(())
     }};
@@ -331,12 +340,24 @@ impl IoctlCmd {
                 Self::GOutput => ioctl_body!(get, ops, arg, g_output),
                 Self::SOutput => ioctl_body!(val, ops, arg, s_output, u32),
 
-                // ── 控制 ─────────────────────────────────────────
-                Self::QueryCtrl => ioctl_body!(rw, ops, arg, queryctrl, QueryCtrl),
-                Self::QueryExtCtrl => ioctl_body!(rw, ops, arg, query_ext_ctrl, QueryExtCtrl),
-                Self::GCtrl => ioctl_body!(rw, ops, arg, g_ctrl, Control),
-                Self::SCtrl => ioctl_body!(wo, ops, arg, s_ctrl, Control),
-                Self::QueryMenu => ioctl_body!(rw, ops, arg, querymenu, Querymenu),
+                // ── 控件查询（经驱动 CtrlHandler，核心统一处理）────
+                Self::QueryCtrl => ioctl_body!(rw_ctrl, ops, arg, queryctrl, QueryCtrl),
+                Self::QueryExtCtrl => {
+                    ioctl_body!(rw_ctrl, ops, arg, query_ext_ctrl, QueryExtCtrl)
+                }
+                Self::QueryMenu => ioctl_body!(rw_ctrl, ops, arg, querymenu, Querymenu),
+
+                // ── 核心代管 ioctl（priority / ext_ctrls / event）──
+                // 由 VideoDevice::handle_ioctl 或 pseudofs glue 拦截路由，
+                // 不进此分发器。
+                Self::GPriority
+                | Self::SPriority
+                | Self::GExtCtrls
+                | Self::SExtCtrls
+                | Self::TryExtCtrls
+                | Self::DQEvent
+                | Self::SubscribeEvent
+                | Self::UnsubscribeEvent => Err(V4l2Error::NotSupported),
 
                 // ── 裁剪 / Selection ─────────────────────────────
                 Self::CropCap => ioctl_body!(rw, ops, arg, cropcap, Cropcap),
@@ -358,17 +379,6 @@ impl IoctlCmd {
 
                 // ── 日志 ────────────────────────────────────────
                 Self::LogStatus => ioctl_body!(noarg, ops, arg, log_status),
-
-                // ── core 代管 ioctl（priority / ext_ctrls / event）──
-                // 由 VideoDevice::handle_ioctl 拦截路由，不进此分发器。
-                Self::GPriority
-                | Self::SPriority
-                | Self::GExtCtrls
-                | Self::SExtCtrls
-                | Self::TryExtCtrls
-                | Self::DQEvent
-                | Self::SubscribeEvent
-                | Self::UnsubscribeEvent => Err(V4l2Error::NotSupported),
             }
         }
     }
@@ -380,6 +390,9 @@ impl LegacyIoctlCmd {
         // SAFETY: `arg` 长度已由 VFS 层按 ioctl 编码保证。
         unsafe {
             match self {
+                Self::GCtrl => ioctl_body!(rw_ctrl, ops, arg, g_ctrl, Control),
+                Self::SCtrl => ioctl_body!(rw_ctrl, ops, arg, s_ctrl, Control),
+
                 // ── Overlay 帧缓冲 ────────────────────────────
                 Self::GFbuf => ioctl_body!(rw, ops, arg, g_fbuf, Framebuffer),
                 Self::SFbuf => ioctl_body!(wo, ops, arg, s_fbuf, Framebuffer),
@@ -442,9 +455,34 @@ impl LegacyIoctlCmd {
     }
 }
 
+// ── 统一命令枚举（modern + legacy）──────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoIoctl {
+    Modern(IoctlCmd),
+    Legacy(LegacyIoctlCmd),
+}
+
+impl VideoIoctl {
+    /// 由原始 ioctl 命令号归一化；未知命令返回 `None`（对应 ENOTTY）。
+    pub fn try_from_u32(cmd: u32) -> Option<Self> {
+        IoctlCmd::try_from_u32(cmd)
+            .map(Self::Modern)
+            .or_else(|| LegacyIoctlCmd::try_from_u32(cmd).map(Self::Legacy))
+    }
+
+    /// 原始命令号（用于分发器的有效位图索引）。
+    pub(crate) fn raw(self) -> u32 {
+        match self {
+            Self::Modern(c) => c as u32,
+            Self::Legacy(c) => c as u32,
+        }
+    }
+}
+
 // ── 分发器（带有效位图的薄封装） ─────────────────────────
 
-/// IOCTL 分发器 — 校验并分发原始 ioctl 命令号。
+/// IOCTL 分发器 — 校验并分发统一命令（[`VideoIoctl`]）。
 pub struct IoctlDispatcher {
     valid: [u64; 4],
 }
@@ -467,19 +505,19 @@ impl IoctlDispatcher {
         self.valid[idx / 64] & (1u64 << (idx % 64)) != 0
     }
 
-    /// 将原始 ioctl 命令号分发给驱动（modern → [`IoctlOps`]，
-    /// legacy → [`LegacyIoctlOps`]）。
-    pub fn dispatch(&self, ops: &mut dyn V4L2DriverOps, cmd: u32, arg: &mut [u8]) -> Result<()> {
-        if !self.is_valid(cmd) {
+    pub fn dispatch(
+        &self,
+        ops: &mut dyn V4L2DriverOps,
+        cmd: VideoIoctl,
+        arg: &mut [u8],
+    ) -> Result<()> {
+        if !self.is_valid(cmd.raw()) {
             return Err(V4l2Error::NotSupported);
         }
-        if let Some(c) = IoctlCmd::try_from_u32(cmd) {
-            return c.dispatch(ops, arg);
+        match cmd {
+            VideoIoctl::Modern(c) => c.dispatch(ops, arg),
+            VideoIoctl::Legacy(c) => c.dispatch(ops, arg),
         }
-        if let Some(c) = LegacyIoctlCmd::try_from_u32(cmd) {
-            return c.dispatch(ops, arg);
-        }
-        Err(V4l2Error::NotSupported)
     }
 }
 
@@ -522,13 +560,31 @@ mod tests {
         assert_eq!(IoctlCmd::try_from_u32(0xdead_beef), None);
         assert_eq!(IoctlCmd::try_from_u32(0x8004_562D), None); // 表外 nr=45
         assert_eq!(LegacyIoctlCmd::try_from_u32(0xdead_beef), None);
+        assert_eq!(VideoIoctl::try_from_u32(0xdead_beef), None);
+    }
+
+    /// `VideoIoctl` 归一化：modern 与 legacy 命令都归一到统一枚举；
+    /// 弃用的 GCtrl/SCtrl（现属 legacy）不再被当作 modern。
+    #[test]
+    fn video_ioctl_normalizes_modern_and_legacy() {
+        assert_eq!(
+            VideoIoctl::try_from_u32(IoctlCmd::QueryCtrl as u32),
+            Some(VideoIoctl::Modern(IoctlCmd::QueryCtrl))
+        );
+        assert_eq!(
+            VideoIoctl::try_from_u32(LegacyIoctlCmd::GCtrl as u32),
+            Some(VideoIoctl::Legacy(LegacyIoctlCmd::GCtrl))
+        );
+        // modern 不再包含 GCtrl/SCtrl（已移入 legacy）。
+        assert_eq!(IoctlCmd::try_from_u32(LegacyIoctlCmd::GCtrl as u32), None);
+        assert_eq!(IoctlCmd::try_from_u32(LegacyIoctlCmd::SCtrl as u32), None);
     }
 
     /// 补全性检查：83 个命令覆盖全部 VIDIOC 定义，且现代/遗留无重叠。
     #[test]
     fn ioctl_count_matches_linux() {
-        assert_eq!(IoctlCmd::COUNT, 49);
-        assert_eq!(LegacyIoctlCmd::COUNT, 34);
+        assert_eq!(IoctlCmd::COUNT, 47);
+        assert_eq!(LegacyIoctlCmd::COUNT, 36);
         assert_eq!(IoctlCmd::COUNT + LegacyIoctlCmd::COUNT, 83);
         for c in IoctlCmd::ALL {
             assert_eq!(IoctlCmd::try_from_u32(c as u32), Some(c));

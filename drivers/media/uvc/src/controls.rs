@@ -6,14 +6,28 @@
 use alloc::{boxed::Box, vec::Vec};
 
 use v4l2_core::{
-    ctrls::{CtrlGetFn, CtrlHandler, CtrlSetFn},
-    uapi::controls::{CameraClassCtrl, UserClassCtrl},
+    ctrls::{
+        CtrlConfig, CtrlGetFn, CtrlHandler, CtrlOps, CtrlSetFn, CtrlType,
+        class::{CameraClassCtrl, UserClassCtrl},
+    },
+    interface::ctrl::CtrlFlags,
 };
 
 use crate::{
     UvcHandle,
     descriptors::{CameraTerminalControl, ProcessingUnitControl, RequestCode},
 };
+
+/// `V4L2_CID_POWER_LINE_FREQUENCY` 菜单项。
+const POWER_LINE_FREQ_MENU: &[&str] = &["Disabled", "50 Hz", "60 Hz", "Auto"];
+
+/// `V4L2_CID_EXPOSURE_AUTO` 菜单项。
+const EXPOSURE_AUTO_MENU: &[&str] = &[
+    "Manual Mode",
+    "Aperture Priority Mode",
+    "Shutter Priority Mode",
+    "Auto Mode",
+];
 
 /// 控件所在单元（Processing Unit 或 Camera Terminal）。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -312,38 +326,60 @@ pub fn register_uvc_controls<H: UvcHandle>(
             Ok(v)
         });
 
-        // 4. 注册（菜单/布尔/整数），统一走 CtrlOps（Linux v4l2_ctrl_ops 形态）
-        let ops = v4l2_core::ctrls::CtrlOps {
-            get: get_fn,
+        // 4. 注册：硬件代理控件（Linux v4l2_ctrl_ops 形态）。VOLATILE 表示
+        //    G 读取时走 get 回调（从设备取当前值），S 时始终写设备。
+        let ops = CtrlOps {
+            get: Some(get_fn),
+            try_ctrl: None,
             set: set_fn,
         };
-
-        if def.menu_items > 0 {
-            ctrls.new_menu(
-                def.cid,
-                def.name,
-                def.menu_items,
-                default as u32,
-                move |idx| match def.cid {
-                    c if c == UserClassCtrl::PowerLineFrequency as u32 => match idx {
-                        0 => Some("Disabled"),
-                        1 => Some("50 Hz"),
-                        2 => Some("60 Hz"),
-                        _ => Some("Auto"),
-                    },
-                    _ => match idx {
-                        0 => Some("Manual Mode"),
-                        1 => Some("Aperture Priority Mode"),
-                        2 => Some("Shutter Priority Mode"),
-                        _ => Some("Auto Mode"),
-                    },
-                },
-                Some(ops),
-            );
+        let cfg = if def.menu_items > 0 {
+            let qmenu = if def.cid == UserClassCtrl::PowerLineFrequency as u32 {
+                POWER_LINE_FREQ_MENU
+            } else {
+                EXPOSURE_AUTO_MENU
+            };
+            CtrlConfig {
+                id: def.cid,
+                name: def.name,
+                ctrl_type: CtrlType::Menu,
+                minimum: 0,
+                maximum: def.menu_items as i64 - 1,
+                step: 0,
+                default_value: default.clamp(0, def.menu_items as i64 - 1),
+                flags: CtrlFlags::VOLATILE,
+                qmenu: Some(qmenu),
+                ops: Some(ops),
+            }
         } else if def.is_bool {
-            ctrls.new_bool(def.cid, def.name, default != 0, Some(ops));
+            CtrlConfig {
+                id: def.cid,
+                name: def.name,
+                ctrl_type: CtrlType::Boolean,
+                minimum: 0,
+                maximum: 1,
+                step: 1,
+                default_value: default.clamp(0, 1),
+                flags: CtrlFlags::VOLATILE,
+                qmenu: None,
+                ops: Some(ops),
+            }
         } else {
-            ctrls.new_int(def.cid, def.name, min, max, step, default, Some(ops));
-        }
+            CtrlConfig {
+                id: def.cid,
+                name: def.name,
+                ctrl_type: CtrlType::Integer,
+                minimum: min,
+                maximum: max,
+                step: step as u64,
+                default_value: default,
+                flags: CtrlFlags::VOLATILE,
+                qmenu: None,
+                ops: Some(ops),
+            }
+        };
+        ctrls
+            .new_ctrl(cfg)
+            .expect("uvc control registration must succeed");
     }
 }

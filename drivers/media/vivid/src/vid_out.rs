@@ -14,7 +14,7 @@ use v4l2_core::{
         buffer::{BufFlags, Buffer, Requestbuffers},
         capability::{Capabilities, Capability},
         colorspace::Colorspace,
-        common::{BufType, Field, Memory, Timeval},
+        {BufType, Field, Memory, Timeval},
         format::{self, Fmtdesc, Format, FrameIntervalEnum, FrameSizeEnum},
         inout::{self, OutputType},
         stream::StreamParm,

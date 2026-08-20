@@ -11,7 +11,10 @@ use alloc::{sync::Arc, vec::Vec};
 
 use axpoll::PollSet;
 
-use crate::ioctl::{IoctlOps, LegacyIoctlOps};
+use crate::{
+    ctrls::handler::CtrlHandler,
+    ioctl::{IoctlOps, LegacyIoctlOps},
+};
 
 /// 完整 V4L2 驱动对象：非 ioctl 的 VFS 操作 + 全部 ioctl 回调。
 ///
@@ -49,4 +52,9 @@ pub trait V4L2DriverOps: Send + Sync + IoctlOps + LegacyIoctlOps {
 
     /// 当指向此设备的最后一个文件描述符关闭时调用。
     fn release(&self) {}
+
+    /// 驱动拥有的控件处理器（对应 Linux `v4l2_ctrl_handler`）。
+    fn ctrl_handler(&self) -> Option<&CtrlHandler> {
+        None
+    }
 }
