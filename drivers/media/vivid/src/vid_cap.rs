@@ -401,28 +401,6 @@ impl IoctlOps for VividCapture {
         Ok(())
     }
 
-    fn g_crop(&self, c: &mut Crop) -> v4l2_core::Result<()> {
-        c.c.left = self.state.crop_left.load(Ordering::Acquire) as i32;
-        c.c.top = self.state.crop_top.load(Ordering::Acquire) as i32;
-        c.c.width = self.state.crop_width.load(Ordering::Acquire);
-        c.c.height = self.state.crop_height.load(Ordering::Acquire);
-        Ok(())
-    }
-
-    fn s_crop(&mut self, c: &Crop) -> v4l2_core::Result<()> {
-        let w = self.state.fmt_width.load(Ordering::Acquire);
-        let h = self.state.fmt_height.load(Ordering::Acquire);
-        let cw = c.c.width.min(w);
-        let ch = c.c.height.min(h);
-        let cl = c.c.left.max(0).min((w - cw) as i32) as u32;
-        let ct = c.c.top.max(0).min((h - ch) as i32) as u32;
-        self.state.crop_left.store(cl, Ordering::Release);
-        self.state.crop_top.store(ct, Ordering::Release);
-        self.state.crop_width.store(cw, Ordering::Release);
-        self.state.crop_height.store(ch, Ordering::Release);
-        Ok(())
-    }
-
     fn g_selection(&self, s: &mut Selection) -> v4l2_core::Result<()> {
         let fmt_w = self.state.fmt_width.load(Ordering::Acquire);
         let fmt_h = self.state.fmt_height.load(Ordering::Acquire);
@@ -665,6 +643,34 @@ impl IoctlOps for VividCapture {
     fn streamoff(&mut self, _ty: BufType) -> v4l2_core::Result<()> {
         self.state.streaming.store(false, Ordering::Release);
         self.queue.streamoff();
+        Ok(())
+    }
+}
+
+// ── LegacyIoctlOps 实现 ────────────────────────────────────────────────
+
+impl v4l2_core::LegacyIoctlOps for VividCapture {
+    // 旧裁剪 API（G_CROP/S_CROP）——Linux core 已用 selection 模拟，
+    // 此处保留显式实现以支持旧式用户态。
+    fn g_crop(&self, c: &mut Crop) -> v4l2_core::Result<()> {
+        c.c.left = self.state.crop_left.load(Ordering::Acquire) as i32;
+        c.c.top = self.state.crop_top.load(Ordering::Acquire) as i32;
+        c.c.width = self.state.crop_width.load(Ordering::Acquire);
+        c.c.height = self.state.crop_height.load(Ordering::Acquire);
+        Ok(())
+    }
+
+    fn s_crop(&mut self, c: &Crop) -> v4l2_core::Result<()> {
+        let w = self.state.fmt_width.load(Ordering::Acquire);
+        let h = self.state.fmt_height.load(Ordering::Acquire);
+        let cw = c.c.width.min(w);
+        let ch = c.c.height.min(h);
+        let cl = c.c.left.max(0).min((w - cw) as i32) as u32;
+        let ct = c.c.top.max(0).min((h - ch) as i32) as u32;
+        self.state.crop_left.store(cl, Ordering::Release);
+        self.state.crop_top.store(ct, Ordering::Release);
+        self.state.crop_width.store(cw, Ordering::Release);
+        self.state.crop_height.store(ch, Ordering::Release);
         Ok(())
     }
 }

@@ -11,12 +11,13 @@ use axpoll::{IoEvents, PollSet};
 
 use crate::{
     Result, V4l2Error,
+    driver::V4L2DriverOps,
     filehandler::V4l2Fh,
     interface::{
         ctrl::{Control, ExtControl, ExtControls},
         event::{Event, EventSubscription},
     },
-    ioctl::{IoctlDispatcher, IoctlOps},
+    ioctl::IoctlDispatcher,
 };
 
 /// V4L2 视频设备——对应 Linux 的 `struct video_device`。
@@ -24,7 +25,7 @@ use crate::{
 /// 保存向用户空间提供 ioctl 与 VFS 操作所需的全部内容，
 /// 服务于单个 `/dev/videoX`。
 pub struct VideoDevice {
-    driver: Arc<Mutex<dyn IoctlOps>>,
+    driver: Arc<Mutex<dyn V4L2DriverOps>>,
     dispatcher: IoctlDispatcher,
     name: &'static str,
     fh: Option<V4l2Fh>,
@@ -35,7 +36,7 @@ pub struct VideoDevice {
 
 impl VideoDevice {
     /// 创建新的视频设备。
-    pub fn new(driver: Arc<Mutex<dyn IoctlOps>>, name: &'static str) -> Self {
+    pub fn new(driver: Arc<Mutex<dyn V4L2DriverOps>>, name: &'static str) -> Self {
         Self {
             driver,
             dispatcher: IoctlDispatcher::new(),

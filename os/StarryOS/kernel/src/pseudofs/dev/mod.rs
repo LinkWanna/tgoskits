@@ -826,7 +826,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         if let Some(snap) = snap {
             let cam_driver = uvc_camera::create_camera_driver(snap);
             let events = cam_driver.event_source();
-            let driver: Arc<ax_sync::Mutex<dyn v4l2_core::IoctlOps>> =
+            let driver: Arc<ax_sync::Mutex<dyn v4l2_core::V4L2DriverOps>> =
                 Arc::new(ax_sync::Mutex::new(cam_driver));
             let vdev = VideoDevice::new(driver, "uvc");
 
@@ -845,7 +845,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         {
             let cam = vivid::vid_cap::VividCapture::new();
             let events = cam.event_source();
-            let driver: Arc<ax_sync::Mutex<dyn v4l2_core::IoctlOps>> =
+            let driver: Arc<ax_sync::Mutex<dyn v4l2_core::V4L2DriverOps>> =
                 Arc::new(ax_sync::Mutex::new(cam));
             let vdev = VideoDevice::new(driver, "vivid");
             root.add(
@@ -860,7 +860,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         }
         // /dev/vivid-vid-out — vivid test driver output node.
         {
-            let driver: Arc<ax_sync::Mutex<dyn v4l2_core::IoctlOps>> =
+            let driver: Arc<ax_sync::Mutex<dyn v4l2_core::V4L2DriverOps>> =
                 Arc::new(ax_sync::Mutex::new(vivid::vid_out::VividOutput::new()));
             let vdev = VideoDevice::new(driver, "vivid");
             root.add(

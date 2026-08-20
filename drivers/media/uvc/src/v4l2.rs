@@ -55,6 +55,10 @@ impl<H: UvcHandle> V4L2DriverOps for UvcDevice<H> {
     }
 }
 
+// ── LegacyIoctlOps 实现 ──────────────────────────────────────────────────
+
+impl<H: UvcHandle> v4l2_core::LegacyIoctlOps for UvcDevice<H> {}
+
 // ── IoctlOps 实现 ─────────────────────────────────────────────────────────
 
 impl<H: UvcHandle> IoctlOps for UvcDevice<H> {

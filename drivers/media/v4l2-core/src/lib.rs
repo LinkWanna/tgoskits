@@ -15,4 +15,4 @@ pub mod uapi;
 
 pub use driver::V4L2DriverOps;
 pub use error::{Result, V4l2Error};
-pub use ioctl::IoctlOps;
+pub use ioctl::{IoctlCmd, IoctlOps, LegacyIoctlCmd, LegacyIoctlOps};

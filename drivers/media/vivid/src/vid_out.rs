@@ -275,6 +275,8 @@ impl IoctlOps for VividOutput {
     }
 }
 
+impl v4l2_core::LegacyIoctlOps for VividOutput {}
+
 impl V4L2DriverOps for VividOutput {
     fn mmap(&self, offset: u64, length: u64) -> Option<(Vec<usize>, usize)> {
         self.queue.mmap(offset, length)

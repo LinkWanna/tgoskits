@@ -1,16 +1,26 @@
-//! V4L2DriverOps——非 ioctl 的驱动操作。
+//! V4L2DriverOps — 完整的驱动对象 trait（VFS 操作 + 全部 ioctl）。
 //!
-//! 这些对应 Linux 通过 `struct v4l2_file_operations` 暴露的
-//! VFS 级回调（mmap、poll、release）。它们与 [`IoctlOps`] 分开，
-//! 因为它们是 VFS 操作，而非 ioctl 命令。
+//! `V4L2DriverOps` 对应 Linux 的 `struct v4l2_file_operations` 中
+//! VFS 级回调（mmap、poll、release），并作为 [`IoctlOps`] 与
+//! [`LegacyIoctlOps`] 的 supertrait：一个驱动对象同时持有
+//! 非 ioctl 的 VFS 操作与全部 VIDIOC ioctl 回调，与 Linux
+//! `video_device` 同时挂载 `v4l2_file_operations` 和
+//! `v4l2_ioctl_ops` 的结构一致。
 
 use alloc::{sync::Arc, vec::Vec};
 
 use axpoll::PollSet;
 
-/// 非 ioctl 驱动操作：内存映射、轮询与生命周期。
+use crate::ioctl::{IoctlOps, LegacyIoctlOps};
+
+/// 完整 V4L2 驱动对象：非 ioctl 的 VFS 操作 + 全部 ioctl 回调。
+///
+/// 非 ioctl 操作：内存映射、轮询与生命周期（对应 Linux
+/// `v4l2_file_operations`）。继承 [`IoctlOps`]（modern）与
+/// [`LegacyIoctlOps`]（遗留），因此单个 `dyn V4L2DriverOps`
+/// 即可按命令路由到任意 ioctl trait。
 #[allow(unused_variables)]
-pub trait V4L2DriverOps: Send + Sync {
+pub trait V4L2DriverOps: Send + Sync + IoctlOps + LegacyIoctlOps {
     /// 将用户态 mmap 偏移解析为物理地址（mmap 偏移解码）。
     ///
     /// 由 `Vb2Queue` 支撑的驱动一行委托给 `Vb2Queue::mmap` 即可——
