@@ -825,10 +825,10 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         info!("uvc camera snapshot: {}", snap.is_some());
         if let Some(snap) = snap {
             let cam_driver = uvc_camera::create_camera_driver(snap);
+            let events = cam_driver.event_source();
             let driver: Arc<ax_sync::Mutex<dyn v4l2_core::IoctlOps>> =
                 Arc::new(ax_sync::Mutex::new(cam_driver));
             let vdev = VideoDevice::new(driver, "uvc");
-            let events = Arc::new(ax_sync::Mutex::new(alloc::vec::Vec::new()));
 
             root.add(
                 "video0",

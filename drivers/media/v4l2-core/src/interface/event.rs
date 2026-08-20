@@ -21,8 +21,12 @@ pub struct EventSubscription {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Event {
-    pub ty: u32,             // [out] 事件类型
-    pub data: [u8; 64],      // [out] 事件负载
+    pub ty: u32, // [out] 事件类型
+    /// ABI 对齐填充：C 的 `union v4l2_event.u` 因含 `v4l2_event_ctrl`（带
+    /// `__s64 value64`）而按 8 字节对齐，实际位于偏移 8；`[u8; 64]` 单独只有
+    /// 1 字节对齐，需显式补 4 字节使 `data` 落在偏移 8（经 C 头 offsetof 验证）。
+    pub pad: u32,
+    pub data: [u8; 64],      // [out] 事件负载（union v4l2_event.u，偏移 8）
     pub pending: u32,        // [out] 该类型的待处理事件数量
     pub sequence: u32,       // [out] 单调递增序列号
     pub timestamp: Timespec, // [out] 事件时间戳
@@ -71,5 +75,32 @@ bitflags! {
     pub struct EventSubFlags: u32 {
         /// 订阅时立即发送初始事件。
         const SEND_INITIAL = 1 << 0;
+    }
+}
+
+// ── V4L2_EVENT_CTRL 载荷 ─────────────────────────────────────
+
+/// `v4l2_event_ctrl` 载荷（V4L2_EVENT_CTRL 的 `u` 联合体布局）。
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct EventCtrlPayload {
+    pub changes: u32,
+    pub ty: u32,
+    pub value: u64,
+    pub flags: u32,
+    pub minimum: i32,
+    pub maximum: i32,
+    pub step: i32,
+    pub default_value: i32,
+}
+
+bitflags! {
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct CtrlChange: u32 {
+        /// 值发生变化。
+        const VALUE = 1 << 0;
+        /// 标志位发生变化。
+        const FLAGS = 1 << 1;
     }
 }

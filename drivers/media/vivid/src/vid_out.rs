@@ -288,8 +288,8 @@ impl V4L2DriverOps for VividOutput {
         self.queue.is_error()
     }
 
-    fn poll_set(&self) -> Option<Arc<PollSet>> {
-        Some(self.queue.poll_set().clone())
+    fn vb_poll_set(&self) -> Option<Arc<PollSet>> {
+        Some(self.queue.vb_poll_set().clone())
     }
 
     fn release(&self) {

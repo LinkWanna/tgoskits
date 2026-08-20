@@ -9,9 +9,6 @@ use alloc::{sync::Arc, vec::Vec};
 use axpoll::PollSet;
 
 /// 非 ioctl 驱动操作：内存映射、轮询与生命周期。
-///
-/// 每个 V4L2 驱动都必须实现这些（或接受默认实现）。
-/// 默认实现返回合理的空操作值。
 #[allow(unused_variables)]
 pub trait V4L2DriverOps: Send + Sync {
     /// 将用户态 mmap 偏移解析为物理地址（mmap 偏移解码）。
@@ -36,26 +33,10 @@ pub trait V4L2DriverOps: Send + Sync {
     }
 
     /// 完成事件唤醒源（DQBUF 阻塞与 VFS poll 共用）。
-    ///
-    /// vb2 驱动返回 `Vb2Queue::poll_set()`；唤醒由队列的
-    /// `buffer_done`/`set_error` 在状态发布后发出（IRQ 安全），
-    /// 驱动不得自行调用。返回 `None`（默认）表示设备无异步
-    /// 完成路径——glue 退化为 register 时立即唤醒。
-    fn poll_set(&self) -> Option<Arc<PollSet>> {
+    fn vb_poll_set(&self) -> Option<Arc<PollSet>> {
         None
     }
 
     /// 当指向此设备的最后一个文件描述符关闭时调用。
-    ///
-    /// 驱动应在此释放流资源并释放 buffer。
-    ///
-    /// # 锁约定
-    ///
-    /// 此方法在**持有设备驱动锁时**被调用（见
-    /// `VideoDevice::close_fh`）。实现不得重新获取
-    /// 驱动锁（例如通过回调 `IoctlOps` 方法或
-    /// 获取锁的 `VideoDevice` API）——否则会死锁。
-    /// 锁定非驱动锁本身的队列级/设备级
-    /// 状态是允许的。
     fn release(&self) {}
 }

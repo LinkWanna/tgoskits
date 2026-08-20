@@ -390,19 +390,10 @@ impl IoctlCmd {
                 }
 
                 // ── 事件 ───────────────────────────────────────────
-                Self::DQEvent => {
-                    let mut ev: Event = read_from_bytes(arg);
-                    ops.dqevent(&mut ev)?;
-                    write_to_bytes(arg, &ev);
-                    Ok(())
-                }
-                Self::SubscribeEvent => {
-                    let sub: EventSubscription = read_from_bytes(arg);
-                    ops.subscribe_event(&sub)
-                }
-                Self::UnsubscribeEvent => {
-                    let sub: EventSubscription = read_from_bytes(arg);
-                    ops.unsubscribe_event(&sub)
+                // 事件 ioctl 由 VideoDevice::handle_ioctl 拦截并路由到
+                // 驱动回调（带 fh），不进此分发器；此处仅满足 match 穷尽性。
+                Self::DQEvent | Self::SubscribeEvent | Self::UnsubscribeEvent => {
+                    Err(V4l2Error::NotSupported)
                 }
             }
         }

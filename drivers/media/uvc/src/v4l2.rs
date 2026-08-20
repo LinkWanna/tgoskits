@@ -8,11 +8,13 @@ use axpoll::{IoEvents, PollSet};
 use log::*;
 use v4l2_core::{
     IoctlOps, V4L2DriverOps, V4l2Error,
+    filehandler::V4l2Fh,
     interface::{
         buffer,
         capability::{Capabilities, Capability},
         colorspace,
         common::{BufType, Field, Memory, Timeval},
+        event::{CtrlChange, EventSubscription},
         format::{
             self, Fmtdesc, Format, FrameIntervalEnum, FrameIntervalType, FrameSizeEnum,
             FrameSizeType,
@@ -41,8 +43,8 @@ impl<H: UvcHandle> V4L2DriverOps for UvcDevice<H> {
         self.queue.is_error()
     }
 
-    fn poll_set(&self) -> Option<Arc<PollSet>> {
-        Some(self.queue.poll_set().clone())
+    fn vb_poll_set(&self) -> Option<Arc<PollSet>> {
+        Some(self.queue.vb_poll_set().clone())
     }
 
     fn release(&self) {
@@ -321,7 +323,7 @@ impl<H: UvcHandle> IoctlOps for UvcDevice<H> {
         if q.is_error() {
             return Err(V4l2Error::Io);
         }
-        // 阻塞等待采集完成帧。等待源是 vb2 队列内建的 poll_set
+        // 阻塞等待采集完成帧。等待源是 vb2 队列内建的 vb_poll_set
         // （buffer_done/set_error/streamoff 发布状态后唤醒，IRQ 安全）——
         // DQBUF 阻塞与 VFS poll 共用同一唤醒源（对齐 Linux vb2 done_wq）。
         // 等待条件对齐 Linux：done 非空 || 队列错误 || 停流。
@@ -333,7 +335,7 @@ impl<H: UvcHandle> IoctlOps for UvcDevice<H> {
                 // SAFETY: ioctl 任务上下文；register 不持队列锁（is_readable
                 // 的锁已释放），满足 PollSet::register 的上下文与锁约束。
                 unsafe {
-                    q.poll_set()
+                    q.vb_poll_set()
                         .register(cx.waker(), IoEvents::IN | IoEvents::ERR)
                 };
                 if q.is_readable() || q.is_error() || !q.is_streaming() {
@@ -432,8 +434,20 @@ impl<H: UvcHandle> IoctlOps for UvcDevice<H> {
     }
 
     fn s_ctrl(&mut self, ctrl: &v4l2_core::interface::ctrl::Control) -> v4l2_core::Result<()> {
-        self.ctrls.s_ctrl(ctrl)?;
+        if self.ctrls.s_ctrl(ctrl)?.is_some()
+            && let Some(ev) = self.ctrls.change_event(ctrl.id, CtrlChange::VALUE)
+        {
+            self.events.lock().push(ev);
+        }
         Ok(())
+    }
+
+    fn subscribe_event(
+        &mut self,
+        fh: &mut V4l2Fh,
+        sub: &EventSubscription,
+    ) -> v4l2_core::Result<()> {
+        self.ctrls.subscribe_event(fh, sub)
     }
 }
 

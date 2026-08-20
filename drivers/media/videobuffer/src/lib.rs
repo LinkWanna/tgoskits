@@ -183,7 +183,7 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
 
     /// 完成事件唤醒源：DQBUF 阻塞等待与 VFS poll 共用（对齐 Linux
     /// vb2 `done_wq` 单 waitqueue 服务两者）。
-    pub fn poll_set(&self) -> &Arc<PollSet> {
+    pub fn vb_poll_set(&self) -> &Arc<PollSet> {
         &self.poll_rx
     }
 
@@ -500,7 +500,7 @@ mod tests {
         let (waker, count) = counting_waker();
         let _cx = Context::from_waker(&waker);
         // SAFETY: host 测试线程等价任务上下文，满足 PollSet::register 约束。
-        unsafe { q.poll_set().register(&waker, IoEvents::IN) };
+        unsafe { q.vb_poll_set().register(&waker, IoEvents::IN) };
         assert_eq!(count.load(Ordering::SeqCst), 0);
 
         q.buffer_done(0, BufferState::Done, 4096, 0).unwrap();
@@ -518,8 +518,8 @@ mod tests {
         let (waker_in, in_count) = counting_waker();
         // SAFETY: host 测试线程等价任务上下文。
         unsafe {
-            q.poll_set().register(&waker_err, IoEvents::ERR);
-            q.poll_set().register(&waker_in, IoEvents::IN);
+            q.vb_poll_set().register(&waker_err, IoEvents::ERR);
+            q.vb_poll_set().register(&waker_in, IoEvents::IN);
         }
 
         q.set_error();
@@ -535,7 +535,7 @@ mod tests {
         let q = streaming_queue();
         let (waker, count) = counting_waker();
         // SAFETY: host 测试线程等价任务上下文。
-        unsafe { q.poll_set().register(&waker, IoEvents::IN) };
+        unsafe { q.vb_poll_set().register(&waker, IoEvents::IN) };
 
         // 索引越界 → 拒绝，无唤醒。
         assert!(q.buffer_done(9, BufferState::Done, 0, 0).is_err());
@@ -551,7 +551,10 @@ mod tests {
         let q = streaming_queue();
         let (waker, count) = counting_waker();
         // SAFETY: host 测试线程等价任务上下文。
-        unsafe { q.poll_set().register(&waker, IoEvents::IN | IoEvents::ERR) };
+        unsafe {
+            q.vb_poll_set()
+                .register(&waker, IoEvents::IN | IoEvents::ERR)
+        };
         assert_eq!(count.load(Ordering::SeqCst), 0);
 
         q.streamoff();

@@ -11,7 +11,11 @@ use core::sync::atomic::{AtomicI64, Ordering};
 
 use crate::{
     V4l2Error,
-    interface::ctrl::{Control, QueryCtrl, QueryExtCtrl, Querymenu},
+    filehandler::{CtrlEventParams, EventOps, V4l2Fh, build_ctrl_event},
+    interface::{
+        ctrl::{Control, QueryCtrl, QueryExtCtrl, Querymenu},
+        event::{CtrlChange, Event, EventSubFlags, EventSubscription, EventType},
+    },
 };
 
 type Result<T> = core::result::Result<T, V4l2Error>;
@@ -385,6 +389,49 @@ impl CtrlHandler {
         q.flags = crate::interface::ctrl::CtrlFlags::empty();
         Ok(())
     }
+
+    // ── 控件事件（V4L2_EVENT_CTRL） ────────────────────────────────
+
+    /// 处理 `VIDIOC_SUBSCRIBE_EVENT` 的 V4L2_EVENT_CTRL 订阅。
+    pub fn subscribe_event(&self, fh: &mut V4l2Fh, sub: &EventSubscription) -> Result<()> {
+        if sub.ty != EventType::Ctrl as u32 {
+            return Err(V4l2Error::InvalidArgument);
+        }
+        let ctrl = self.find(sub.id).ok_or(V4l2Error::InvalidArgument)?;
+        // 已订阅：幂等返回，不重复发送初始事件（对齐 Linux add 回调仅对新订阅触发）。
+        if fh.is_subscribed(sub.ty, sub.id) {
+            return Ok(());
+        }
+        fh.subscribe(sub, 0, EventOps::Ctrl)?;
+        if sub.flags.contains(EventSubFlags::SEND_INITIAL) {
+            let ev = Self::fill_event(ctrl, CtrlChange::VALUE | CtrlChange::FLAGS);
+            fh.queue_event(ev);
+        }
+        Ok(())
+    }
+
+    /// 构建控件值变化事件（供驱动在 `s_ctrl` 值变化后投递）。
+    pub fn change_event(&self, id: u32, changes: CtrlChange) -> Option<Event> {
+        let ctrl = self.find(id)?;
+        Some(Self::fill_event(ctrl, changes))
+    }
+
+    /// 填充 `V4L2_EVENT_CTRL` 载荷（对齐 Linux `v4l2_ctrls-core.c::fill_event`）。
+    fn fill_event(ctrl: &CtrlRef, changes: CtrlChange) -> Event {
+        build_ctrl_event(
+            CtrlEventParams {
+                id: ctrl.id,
+                ctrl_type: ctrl.ctrl_type as u32,
+                value: ctrl.value(),
+                flags: ctrl.flags,
+                minimum: ctrl.minimum,
+                maximum: ctrl.maximum,
+                step: ctrl.step,
+                default_value: ctrl.default_value,
+            },
+            changes,
+        )
+    }
 }
 
 impl Default for CtrlHandler {
@@ -459,7 +506,7 @@ mod tests {
                     last_id = q.id;
                     count += 1;
                     // 模拟用户态推进（Linux v4l_queryctrl：返回 id + NEXT 标志）
-                    q.id = q.id | NEXT_CTRL;
+                    q.id |= NEXT_CTRL;
                     assert!(count <= 16, "enumeration did not terminate");
                 }
                 Err(V4l2Error::InvalidArgument) => break,
@@ -492,5 +539,127 @@ mod tests {
             handler.queryctrl(&mut q),
             Err(V4l2Error::InvalidArgument)
         ));
+    }
+
+    // ── 控件事件 ────────────────────────────────────────────────────
+
+    use crate::{
+        filehandler::V4l2Fh,
+        interface::event::{
+            CtrlChange, Event, EventCtrlPayload, EventSubFlags, EventSubscription, EventType,
+        },
+    };
+
+    fn ctrl_sub(id: u32, flags: EventSubFlags) -> EventSubscription {
+        EventSubscription {
+            ty: EventType::Ctrl as u32,
+            id,
+            flags,
+            reserved: [0; 5],
+        }
+    }
+
+    fn zero_event() -> Event {
+        Event {
+            ty: 0,
+            pad: 0,
+            data: [0; 64],
+            pending: 0,
+            sequence: 0,
+            timestamp: crate::interface::common::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            id: 0,
+            reserved: [0; 8],
+        }
+    }
+
+    fn read_ctrl(ev: &Event) -> EventCtrlPayload {
+        let mut payload = [0u8; core::mem::size_of::<EventCtrlPayload>()];
+        payload.copy_from_slice(&ev.data[..core::mem::size_of::<EventCtrlPayload>()]);
+        // SAFETY: EventCtrlPayload 是 repr(C) POD，长度等于 size_of。
+        unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const EventCtrlPayload) }
+    }
+
+    /// SEND_INITIAL：订阅后立即投递初始事件——正是 v4l2-compliance
+    /// `testEvents` 依赖的路径（subscribe → select(POLLPRI) → DQEVENT）。
+    #[test]
+    fn subscribe_with_send_initial_queues_initial_event() {
+        let mut handler = CtrlHandler::new();
+        handler.new_int(0x0098_0900, "Brightness", 0, 255, 1, 128, None);
+        let mut fh = V4l2Fh::new();
+
+        handler
+            .subscribe_event(&mut fh, &ctrl_sub(0x0098_0900, EventSubFlags::SEND_INITIAL))
+            .unwrap();
+        assert_eq!(fh.pending(), 1, "SEND_INITIAL queues one initial event");
+
+        let out = fh.dequeue().unwrap();
+        assert_eq!(out.ty, EventType::Ctrl as u32);
+        assert_eq!(out.id, 0x0098_0900);
+        assert_eq!(out.reserved, [0; 8], "reserved must be zeroed");
+        let payload = read_ctrl(&out);
+        assert_eq!(
+            payload.changes,
+            (CtrlChange::VALUE | CtrlChange::FLAGS).bits(),
+            "initial event changes = VALUE|FLAGS"
+        );
+        assert_eq!(payload.value, 128, "initial event carries current value");
+    }
+
+    /// 订阅不存在的控件 ID 或非 CTRL 类型必须 EINVAL（对齐
+    /// `v4l2_ctrl_subscribe_event`）。
+    #[test]
+    fn subscribe_rejects_unknown_ctrl_and_non_ctrl_type() {
+        let mut handler = CtrlHandler::new();
+        handler.new_int(0x0098_0900, "Brightness", 0, 255, 1, 128, None);
+        let mut fh = V4l2Fh::new();
+
+        assert!(matches!(
+            handler.subscribe_event(&mut fh, &ctrl_sub(0xDEAD_BEEF, EventSubFlags::empty())),
+            Err(V4l2Error::InvalidArgument)
+        ));
+        assert!(matches!(
+            handler.subscribe_event(
+                &mut fh,
+                &ctrl_sub(EventType::Eos as u32, EventSubFlags::empty())
+            ),
+            Err(V4l2Error::InvalidArgument)
+        ));
+        assert_eq!(fh.pending(), 0);
+    }
+
+    /// 未带 SEND_INITIAL 的订阅不投递初始事件。
+    #[test]
+    fn subscribe_without_send_initial_queues_nothing() {
+        let mut handler = CtrlHandler::new();
+        handler.new_int(0x0098_0900, "Brightness", 0, 255, 1, 128, None);
+        let mut fh = V4l2Fh::new();
+
+        handler
+            .subscribe_event(&mut fh, &ctrl_sub(0x0098_0900, EventSubFlags::empty()))
+            .unwrap();
+        assert_eq!(fh.pending(), 0);
+        assert_eq!(read_ctrl(&zero_event()).changes, 0);
+    }
+
+    /// 控件值变化后 change_event 构造的载荷带当前值。
+    #[test]
+    fn change_event_carries_new_value() {
+        let mut handler = CtrlHandler::new();
+        handler.new_int(0x0098_0900, "Brightness", 0, 255, 1, 128, None);
+        handler
+            .s_ctrl(&Control {
+                id: 0x0098_0900,
+                value: 200,
+            })
+            .unwrap();
+        let ev = handler
+            .change_event(0x0098_0900, CtrlChange::VALUE)
+            .unwrap();
+        assert_eq!(ev.id, 0x0098_0900);
+        assert_eq!(read_ctrl(&ev).value, 200);
+        assert_eq!(read_ctrl(&ev).changes, CtrlChange::VALUE.bits());
     }
 }

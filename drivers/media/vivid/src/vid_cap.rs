@@ -12,6 +12,7 @@ use v4l2_core::{
     self, IoctlOps, V4L2DriverOps,
     ctrls::CtrlHandler,
     error::V4l2Error,
+    filehandler::V4l2Fh,
     interface::{
         buffer::{BufFlags, Buffer, Requestbuffers},
         capability::{Capabilities, Capability},
@@ -19,7 +20,7 @@ use v4l2_core::{
         common::{BufType, Field, Memory, Timeval},
         crop::{Crop, Cropcap, Selection, SelectionTarget},
         ctrl::Control,
-        event::EventType,
+        event::{CtrlChange, EventSubscription},
         format::{
             Fmtdesc, Format, FrameIntervalEnum, FrameIntervalType, FrameSizeEnum, FrameSizeType,
         },
@@ -486,34 +487,25 @@ impl IoctlOps for VividCapture {
         let state = unsafe { &mut *Arc::as_ptr(&self.state).cast_mut() };
         let old_val = state.ctrls.find(ctrl.id).map(|cr| cr.value());
         state.ctrls.s_ctrl(ctrl)?;
-        if let (Some(cr), Some(old)) = (state.ctrls.find(ctrl.id), old_val) {
-            let new_val = cr.value();
-            if old != new_val {
-                // 控制变更事件（V4L2_EVENT_CTRL）：负载 = struct v4l2_event_ctrl。
-                let mut data = [0u8; 64];
-                data[0..4].copy_from_slice(&1u32.to_ne_bytes()); // changes
-                data[4..8].copy_from_slice(&(cr.ctrl_type as u32).to_ne_bytes());
-                data[8..12].copy_from_slice(&(new_val as i32).to_ne_bytes());
-                data[20..24].copy_from_slice(&(cr.minimum as i32).to_ne_bytes());
-                data[24..28].copy_from_slice(&(cr.maximum as i32).to_ne_bytes());
-                data[28..32].copy_from_slice(&(cr.step as i32).to_ne_bytes());
-                data[32..36].copy_from_slice(&(cr.default_value as i32).to_ne_bytes());
-                // sequence 由框架（V4l2Fh::push_event）在投递时填充。
-                self.events.lock().push(v4l2_core::interface::event::Event {
-                    ty: EventType::Ctrl as u32,
-                    data,
-                    pending: 0,
-                    sequence: 0,
-                    timestamp: v4l2_core::interface::common::Timespec {
-                        tv_sec: 0,
-                        tv_nsec: 0,
-                    },
-                    id: ctrl.id,
-                    reserved: [0; 8],
-                });
+        let new_val = state.ctrls.find(ctrl.id).map(|cr| cr.value());
+        if let (Some(old), Some(new)) = (old_val, new_val)
+            && old != new
+        {
+            // 控制变更事件（V4L2_EVENT_CTRL）：载荷由 CtrlHandler 填充
+            // （含 changes 位）；入队后由 glue 排空到 fh。
+            if let Some(ev) = state.ctrls.change_event(ctrl.id, CtrlChange::VALUE) {
+                self.events.lock().push(ev);
             }
         }
         Ok(())
+    }
+
+    fn subscribe_event(
+        &mut self,
+        fh: &mut V4l2Fh,
+        sub: &EventSubscription,
+    ) -> v4l2_core::Result<()> {
+        self.state.ctrls.subscribe_event(fh, sub)
     }
 
     fn querymenu(&self, q: &mut v4l2_core::interface::ctrl::Querymenu) -> v4l2_core::Result<()> {
@@ -662,7 +654,7 @@ impl IoctlOps for VividCapture {
                     crate::tpg::fill_buffer(pat, tpg_fmt, w, h, 0, slice);
                 }
                 q.buffer_done(i, BufferState::Done, sizeimage, Field::NoField as u32)?;
-                // 唤醒由 buffer_done 内建（DQBUF 阻塞与 poll 共用队列 poll_set）。
+                // 唤醒由 buffer_done 内建（DQBUF 阻塞与 poll 共用队列 vb_poll_set）。
             }
         }
 
@@ -688,8 +680,8 @@ impl V4L2DriverOps for VividCapture {
         self.queue.is_error()
     }
 
-    fn poll_set(&self) -> Option<Arc<PollSet>> {
-        Some(self.queue.poll_set().clone())
+    fn vb_poll_set(&self) -> Option<Arc<PollSet>> {
+        Some(self.queue.vb_poll_set().clone())
     }
 
     fn mmap(&self, offset: u64, length: u64) -> Option<(Vec<usize>, usize)> {

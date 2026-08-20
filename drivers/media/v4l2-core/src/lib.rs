@@ -8,7 +8,7 @@ pub mod ctrls;
 pub mod device;
 pub mod driver;
 pub mod error;
-pub mod fh;
+pub mod filehandler;
 pub mod interface;
 pub mod ioctl;
 pub mod uapi;

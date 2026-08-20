@@ -282,6 +282,8 @@ pub struct UvcDevice<H: UvcHandle> {
     need_payload: usize,
     stream: Mutex<Option<IsoStreamWorker>>,
     trace: Arc<UvcTrace>,
+    /// V4L2 事件源：驱动投递事件（如控件变更），由 glue 排空到 fh。
+    events: Arc<Mutex<Vec<v4l2_core::interface::event::Event>>>,
 }
 
 impl<H: UvcHandle> UvcDevice<H> {
@@ -319,6 +321,7 @@ impl<H: UvcHandle> UvcDevice<H> {
             need_payload: 0,
             stream: Mutex::new(None),
             trace: Arc::new(UvcTrace::default()),
+            events: Arc::new(Mutex::new(Vec::new())),
         };
 
         for fmt in &device.formats {
@@ -345,6 +348,11 @@ impl<H: UvcHandle> UvcDevice<H> {
         info!("[UVC] registered {} controls", device.ctrls.count());
 
         Ok(device)
+    }
+
+    /// V4L2 事件源：驱动投递的事件（如控件变更），由 glue 在 ioctl 后排空到 fh。
+    pub fn event_source(&self) -> Arc<Mutex<Vec<v4l2_core::interface::event::Event>>> {
+        Arc::clone(&self.events)
     }
 
     /// 设置视频格式

@@ -155,7 +155,7 @@ pub(crate) fn process_iso_batch<M: Vb2MemOps>(
             if let Some(evt) = result.evt {
                 if evt.bytes > 0 {
                     // 完整帧：入 vb2 done 队列（内建唤醒：DQBUF 阻塞与
-                    // poll 共用队列 poll_set——无需在此手动通知）。
+                    // poll 共用队列 vb_poll_set——无需在此手动通知）。
                     if let Some((idx, ..)) = dest.take() {
                         // buffer_done 失败 = idx 非 Active（与 take_active 竞争，
                         // 正常不可达）；不做恢复，仅显式忽略。

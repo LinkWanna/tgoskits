@@ -42,17 +42,22 @@ pub struct V4l2DevNode {
     /// 挂在这里，与驱动内 DQBUF 阻塞共用（对齐 Linux vb2 done_wq 模型）。
     /// None：设备无异步完成路径，register 退化为立即唤醒。
     poll_rx: Option<Arc<PollSet>>,
+    /// 事件完成唤醒源（构造时从设备取得）：新事件入队（含 SEND_INITIAL）
+    /// 后唤醒 poll POLLPRI 等待者（对齐 Linux `fh->wait`）。
+    event_poll_rx: Arc<PollSet>,
 }
 
 impl V4l2DevNode {
     fn new(device: VideoDevice, event_source: Option<Arc<ax_sync::Mutex<Vec<Event>>>>) -> Self {
-        // 完成唤醒由驱动（vb2 队列）内建：构造时取一次 poll_set，
-        // 之后 register 无需设备锁。
-        let poll_rx = device.poll_set();
+        // 完成唤醒由驱动（vb2 队列）内建：构造时取一次 vb_poll_set，
+        // 之后 register 无需设备锁。事件唤醒源同理（设备构造时内建）。
+        let poll_rx = device.vb_poll_set();
+        let event_poll_rx = device.event_poll_set();
         Self {
             inner: Arc::new(crate::sync::Mutex::new(device)),
             event_source,
             poll_rx,
+            event_poll_rx,
         }
     }
 
@@ -218,6 +223,11 @@ impl Pollable for V4l2DevNode {
         if dev.is_error() {
             events |= IoEvents::ERR;
         }
+        // POLLPRI：有待处理事件（v4l2_event_pending > 0，对齐 Linux
+        // `vb2_poll` 的 `EPOLLPRI`）。select exceptfds 靠它感知 DQEVENT 可读。
+        if dev.has_pending_events() {
+            events |= IoEvents::PRI;
+        }
         events
     }
 
@@ -236,6 +246,14 @@ impl Pollable for V4l2DevNode {
             // SAFETY: register 从任务上下文（poll 路径）调用，且不持设备锁，
             // 满足 PollSet 约束。
             unsafe { poll_rx.register(context.waker(), interests) };
+        }
+        // 事件唤醒源：新事件入队（含 SEND_INITIAL）后唤醒 POLLPRI 等待者。
+        if !(events & IoEvents::PRI).is_empty() {
+            // SAFETY: 同上——任务上下文调用、不持设备锁。
+            unsafe {
+                self.event_poll_rx
+                    .register(context.waker(), IoEvents::PRI);
+            }
         }
     }
 }

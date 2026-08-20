@@ -7,6 +7,7 @@
 use crate::{
     Result, V4l2Error,
     driver::V4L2DriverOps,
+    filehandler::V4l2Fh,
     interface::{
         buffer::{Buffer, CreateBuffers, Exportbuffer, RemoveBuffers, Requestbuffers},
         capability::Capability,
@@ -189,15 +190,29 @@ pub trait IoctlOps: V4L2DriverOps {
 
     // ── 事件 ────────────────────────────────────────────────────────
 
-    fn subscribe_event(&self, sub: &EventSubscription) -> Result<()> {
+    /// 处理 `VIDIOC_SUBSCRIBE_EVENT`。
+    ///
+    /// 驱动决定支持的事件类型并调用 [`V4l2Fh::subscribe`]（或
+    /// [`crate::ctrls::CtrlHandler::subscribe_event`] 订阅 CTRL 事件）。
+    /// 默认实现拒绝所有类型（`NotSupported`）——不支持事件的设备
+    /// 的订阅必须失败，对齐 Linux 未实现 `vidioc_subscribe_event` 的
+    /// 驱动（v4l2-compliance 以订阅失败判定该事件类型不存在）。
+    fn subscribe_event(&mut self, _fh: &mut V4l2Fh, _sub: &EventSubscription) -> Result<()> {
         Err(V4l2Error::NotSupported)
     }
 
-    fn unsubscribe_event(&self, sub: &EventSubscription) -> Result<()> {
-        Err(V4l2Error::NotSupported)
+    /// 处理 `VIDIOC_UNSUBSCRIBE_EVENT`。
+    fn unsubscribe_event(&mut self, fh: &mut V4l2Fh, sub: &EventSubscription) -> Result<()> {
+        fh.unsubscribe(sub);
+        Ok(())
     }
 
-    fn dqevent(&self, event: &mut Event) -> Result<()> {
-        Err(V4l2Error::NotSupported)
+    /// 处理 `VIDIOC_DQEVENT`（非阻塞）。
+    ///
+    /// 无待处理事件时返回 `NoEntry`（ENOENT），对齐 Linux 非阻塞
+    /// `v4l2_event_dequeue`。
+    fn dqevent(&mut self, fh: &mut V4l2Fh, event: &mut Event) -> Result<()> {
+        *event = fh.dequeue()?;
+        Ok(())
     }
 }
