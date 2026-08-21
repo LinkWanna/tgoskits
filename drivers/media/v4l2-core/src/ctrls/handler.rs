@@ -17,11 +17,10 @@
 //! 线程（如 vivid 的测试图案填充）可无锁读取，与旧实现保持一致。
 
 use alloc::{boxed::Box, vec::Vec};
-use core::sync::atomic::AtomicI64;
 
 use crate::{
     Result, V4l2Error,
-    ctrls::{Ctrl, CtrlConfig, CtrlOps, CtrlType},
+    ctrls::{Ctrl, CtrlType},
     filehandler::{CtrlEventParams, EventOps, V4l2Fh, build_ctrl_event},
     interface::{
         ctrl::{
@@ -47,7 +46,7 @@ pub type CtrlChangeNotify = Box<dyn Fn(Event) + Send + Sync>;
 /// 控件按 id 升序存储（NEXT_CTRL 枚举依赖严格有序表）。ioctl 路径在设备锁
 /// 内调用；读取值的方法可无锁并发。
 pub struct CtrlHandler {
-    ctrls: Vec<Ctrl>,
+    pub(crate) ctrls: Vec<Ctrl>,
     /// 值变化通知回调（由驱动在初始化时设置，推送 `V4L2_EVENT_CTRL`）。
     notify: Option<CtrlChangeNotify>,
 }
@@ -64,171 +63,6 @@ impl CtrlHandler {
     /// 设置值变化通知回调（Linux `v4l2_ctrl_notify` 的事件投递角色）。
     pub fn set_change_notify(&mut self, notify: CtrlChangeNotify) {
         self.notify = Some(notify);
-    }
-
-    // ── 注册 ─────────────────────────────────────────────────
-
-    /// 按 id 有序插入（对齐 Linux 的 `ctrl_refs` 有序表）；重复 id 拒绝。
-    fn insert_sorted(&mut self, ctrl: Ctrl) -> Result<()> {
-        let id = ctrl.id;
-        match self.ctrls.binary_search_by_key(&id, |c| c.id) {
-            Ok(_) => Err(V4l2Error::InvalidArgument),
-            Err(pos) => {
-                self.ctrls.insert(pos, ctrl);
-                Ok(())
-            }
-        }
-    }
-
-    /// 注册一个完整配置的控件（crate 内低层入口；对外请用 `new_int`/`new_bool`/`new_menu` 等类型化接口）。
-    pub(crate) fn new_ctrl(&mut self, cfg: CtrlConfig) -> Result<()> {
-        if cfg.id == 0 || cfg.name.is_empty() || cfg.id >= CID_PRIVATE_BASE {
-            return Err(V4l2Error::OutOfRange);
-        }
-        if cfg.ctrl_type == CtrlType::Menu && cfg.qmenu.is_none() {
-            return Err(V4l2Error::OutOfRange);
-        }
-        cfg.ctrl_type
-            .check_range(cfg.minimum, cfg.maximum, cfg.step, cfg.default_value)?;
-        if cfg.ctrl_type == CtrlType::Menu
-            && let Some(qmenu) = cfg.qmenu
-            && cfg.maximum >= 0
-            && cfg.maximum as usize >= qmenu.len()
-        {
-            return Err(V4l2Error::OutOfRange);
-        }
-
-        // Linux v4l2_ctrl_new：非 Button / CtrlClass 类型声明 HAS_WHICH_MIN_MAX；
-        // Button 强制 WRITE_ONLY | EXECUTE_ON_WRITE；CtrlClass 强制 READ_ONLY。
-        let mut flags = cfg.flags;
-        if !matches!(cfg.ctrl_type, CtrlType::Button | CtrlType::CtrlClass) {
-            flags |= CtrlFlags::HAS_WHICH_MIN_MAX;
-        }
-        match cfg.ctrl_type {
-            CtrlType::Button => {
-                flags |= CtrlFlags::WRITE_ONLY | CtrlFlags::EXECUTE_ON_WRITE;
-            }
-            CtrlType::CtrlClass => flags |= CtrlFlags::READ_ONLY,
-            _ => {}
-        }
-
-        let ctrl = Ctrl {
-            id: cfg.id,
-            name: cfg.name,
-            ctrl_type: cfg.ctrl_type,
-            minimum: cfg.minimum,
-            maximum: cfg.maximum,
-            step: cfg.step,
-            default_value: cfg.default_value,
-            flags,
-            qmenu: cfg.qmenu,
-            ops: cfg.ops,
-            cur: AtomicI64::new(cfg.default_value),
-        };
-        self.insert_sorted(ctrl)
-    }
-
-    /// 注册一个整数控件（硬件代理时 `ops.is_some()` 自动追加 `VOLATILE`）。
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_int(
-        &mut self,
-        id: u32,
-        name: &'static str,
-        min: i64,
-        max: i64,
-        step: i64,
-        default: i64,
-        ops: Option<CtrlOps>,
-    ) -> Result<()> {
-        let flags = if ops.is_some() {
-            CtrlFlags::VOLATILE
-        } else {
-            CtrlFlags::empty()
-        };
-        self.new_ctrl(CtrlConfig {
-            id,
-            name,
-            ctrl_type: CtrlType::Integer,
-            minimum: min,
-            maximum: max,
-            step: step as u64,
-            default_value: default,
-            flags,
-            qmenu: None,
-            ops,
-        })
-    }
-
-    /// 注册一个布尔控件（硬件代理时自动 `VOLATILE`）。
-    pub fn new_bool(
-        &mut self,
-        id: u32,
-        name: &'static str,
-        default: bool,
-        ops: Option<CtrlOps>,
-    ) -> Result<()> {
-        let flags = if ops.is_some() {
-            CtrlFlags::VOLATILE
-        } else {
-            CtrlFlags::empty()
-        };
-        self.new_ctrl(CtrlConfig {
-            id,
-            name,
-            ctrl_type: CtrlType::Boolean,
-            minimum: 0,
-            maximum: 1,
-            step: 1,
-            default_value: default as i64,
-            flags,
-            qmenu: None,
-            ops,
-        })
-    }
-
-    /// 注册带静态菜单项数组的菜单控件（Linux `v4l2_ctrl_new_std_menu_items`）。
-    pub fn new_menu(
-        &mut self,
-        id: u32,
-        name: &'static str,
-        items: u32,
-        default: u32,
-        qmenu: &'static [&'static str],
-        ops: Option<CtrlOps>,
-    ) -> Result<()> {
-        let flags = if ops.is_some() {
-            CtrlFlags::VOLATILE
-        } else {
-            CtrlFlags::empty()
-        };
-        self.new_ctrl(CtrlConfig {
-            id,
-            name,
-            ctrl_type: CtrlType::Menu,
-            minimum: 0,
-            maximum: items as i64 - 1,
-            step: 0,
-            default_value: default as i64,
-            flags,
-            qmenu: Some(qmenu),
-            ops,
-        })
-    }
-
-    /// 注册一个按钮控件（`Button` 恒为 `WRITE_ONLY|EXECUTE_ON_WRITE`）。
-    pub fn new_button(&mut self, id: u32, name: &'static str, ops: Option<CtrlOps>) -> Result<()> {
-        self.new_ctrl(CtrlConfig {
-            id,
-            name,
-            ctrl_type: CtrlType::Button,
-            minimum: 0,
-            maximum: 0,
-            step: 0,
-            default_value: 0,
-            flags: CtrlFlags::empty(),
-            qmenu: None,
-            ops,
-        })
     }
 
     // ── 查找 ───────────────────────────────────────────────────────
@@ -793,11 +627,12 @@ fn round_to_range(v: i64, ctrl: &Ctrl) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use core::sync::atomic::Ordering;
+    use alloc::boxed::Box;
+    use core::sync::atomic::{AtomicI64, Ordering};
 
     use super::*;
     use crate::{
-        ctrls::CtrlOps,
+        ctrls::{CtrlConfig, CtrlOps},
         interface::{
             Timespec,
             ctrl::{ExtControlValue, QueryCtrl},

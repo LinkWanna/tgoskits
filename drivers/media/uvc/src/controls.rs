@@ -101,6 +101,7 @@ const EXPOSURE_AUTO_MENU: &[&str] = &[
 ];
 
 /// UVC 控件的 V4L2 类型
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UvcCtrlType {
     Integer,
@@ -111,12 +112,12 @@ enum UvcCtrlType {
 
 /// Processing Unit 控件定义：V4L2 CID ↔ UVC PU (selector, size)。
 struct UvcControlDef {
-    pub cid: u32,
-    pub name: &'static str,
-    pub selector: u8,
-    pub size: usize,
-    pub ctrl_bit: u8,
-    pub ty: UvcCtrlType,
+    cid: u32,
+    name: &'static str,
+    selector: u8,
+    size: usize,
+    ctrl_bit: u8,
+    ty: UvcCtrlType,
 }
 
 /// PU 控件映射表（UVC 1.5 Table A-13，Linux `uvc_ctrls[]` PU 部分）

@@ -5,6 +5,7 @@
 //! - [`handler`]：`CtrlHandler` 控件处理器——以 `G/S/TryExtCtrls` 为主线，
 //!   `G_CTRL`/`S_CTRL` 作为弃用兼容路径。
 
+mod api;
 pub mod class;
 pub mod handler;
 
