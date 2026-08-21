@@ -24,20 +24,20 @@ use v4l2_core::{
 };
 use videobuffer::{Vb2Queue, VirtualAllocator};
 
-use crate::stream::{ISO_BATCH, ISO_DEPTH, IsoBatchPipeline, IsoStreamHandle, UvcTrace};
+use crate::{
+    helper::{parse_stream_control, parse_uvc_device},
+    stream::{ISO_BATCH, ISO_DEPTH, IsoBatchPipeline, IsoStreamHandle},
+};
 
 // 导入描述符解析模块
 pub mod controls;
 pub mod descriptors;
-pub use controls::VideoStreamingControl;
 pub use descriptors::*;
 
 pub mod frame;
 pub mod helper;
 pub mod stream;
 pub mod v4l2;
-
-use crate::helper::{parse_stream_control, parse_uvc_device};
 
 /// USB 设备句柄 — 控制传输、接口声明/释放、ISO 批提交。
 ///
@@ -282,7 +282,6 @@ pub struct UvcDevice<H: UvcHandle> {
     pub(crate) state: Mutex<UvcDeviceState>,
     need_payload: usize,
     stream: Mutex<Option<IsoStreamWorker>>,
-    trace: Arc<UvcTrace>,
     /// V4L2 事件源：驱动投递事件（如控件变更），由 glue 排空到 fh。
     events: Arc<Mutex<Vec<v4l2_core::interface::event::Event>>>,
 }
@@ -321,7 +320,6 @@ impl<H: UvcHandle> UvcDevice<H> {
             queue: Arc::new(Vb2Queue::new(VirtualAllocator::new(), 2, 8)),
             need_payload: 0,
             stream: Mutex::new(None),
-            trace: Arc::new(UvcTrace::default()),
             events: Arc::new(Mutex::new(Vec::new())),
         };
 
@@ -428,7 +426,6 @@ impl<H: UvcHandle> UvcDevice<H> {
         let worker = {
             let handle = self.handle.clone();
             let queue = self.queue.clone();
-            let trace = self.trace.clone();
             let endpoint = best.ep;
             let cancel = cancel.clone();
             let in_flight = in_flight.clone();
@@ -458,7 +455,7 @@ impl<H: UvcHandle> UvcDevice<H> {
                             break;
                         }
                         let outcome = ax_task::future::block_on(core::future::poll_fn(|cx| {
-                            pipeline.poll_process(cx, &mut session, &queue, &trace)
+                            pipeline.poll_process(cx, &mut session, &queue)
                         }));
                         *in_flight.lock() = Vec::new();
                         if let Err(err) = outcome {
@@ -488,9 +485,6 @@ impl<H: UvcHandle> UvcDevice<H> {
             in_flight,
         });
         info!("[UVC] start_streaming: iso worker armed");
-        // 重置启动 profiling 指标（set-once，跨 STREAMON 会话失效需清零）。
-        self.trace.first_data_batch.store(0, Ordering::Relaxed);
-        self.trace.first_frame_batch.store(0, Ordering::Relaxed);
         *self.state.lock() = UvcDeviceState::Streaming;
         Ok(())
     }
@@ -508,22 +502,9 @@ impl<H: UvcHandle> UvcDevice<H> {
                 let _ = pending.cancel();
             }
             worker.task.join();
-            self.log_stream_summary();
         }
         let _ = self.handle.claim_interface(self.vs_iface_num, 0);
         *self.state.lock() = UvcDeviceState::Configured;
-    }
-
-    /// 打印本次采集会话的完成事件摘要（worker 侧只更新原子，这里统一打印）。
-    fn log_stream_summary(&self) {
-        let trace = &self.trace;
-        info!(
-            "[UVC] stream trace: batches={} frames={} err_packets={} bytes={}",
-            trace.batches.load(Ordering::Relaxed),
-            trace.frames_done.load(Ordering::Relaxed),
-            trace.err_packets.load(Ordering::Relaxed),
-            trace.bytes_received.load(Ordering::Relaxed),
-        );
     }
 
     /// 发送 VS 控制请求

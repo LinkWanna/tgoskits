@@ -5,10 +5,7 @@
 //! 形成持续在飞的流水线；STREAMOFF 时 cancel 全部在飞批 + join。
 
 use alloc::{sync::Arc, vec, vec::Vec};
-use core::{
-    sync::atomic::{AtomicU64, Ordering},
-    task::{Context, Poll},
-};
+use core::task::{Context, Poll};
 
 use crab_usb::usb_if::err::USBError;
 use v4l2_core::interface::Field;
@@ -39,18 +36,6 @@ pub trait IsoStreamHandle: Send + Sync {
     fn cancel(&self) -> Result<(), USBError>;
 }
 
-/// UVC 采集 trace——worker 任务侧更新无锁原子，close 时读取打印。
-#[derive(Debug, Default)]
-pub(crate) struct UvcTrace {
-    pub(crate) batches: AtomicU64,
-    pub(crate) err_packets: AtomicU64,
-    pub(crate) frames_done: AtomicU64,
-    pub(crate) slots_with_data: AtomicU64,
-    pub(crate) bytes_received: AtomicU64,
-    pub(crate) first_data_batch: AtomicU64,
-    pub(crate) first_frame_batch: AtomicU64,
-}
-
 /// 跨批捕获会话：帧解析器 + 当前帧的目标缓冲。
 pub(crate) struct CaptureSession {
     pub(crate) parser: FrameParser,
@@ -72,40 +57,14 @@ pub(crate) fn process_iso_batch<M: Vb2MemOps>(
     queue: &Vb2Queue<M>,
     data: &[u8],
     actuals: &[usize],
-    trace: &UvcTrace,
     slot_len: usize,
 ) {
-    trace.batches.fetch_add(1, Ordering::Relaxed);
     // 帧目标跨批保持：仅无在飞目标（帧起点）时取新缓冲。批开头重取会让
     // requeue 的低索引缓冲劫持在飞帧（见 CaptureSession 文档）。
     if session.dest.is_none() {
         session.dest = acquire_dest(queue);
     }
     let mut dest = session.dest;
-    // 批健康度：非零槽数 + 有效字节（close 时 ÷batches 判断读取状况）。
-    let mut slots = 0u32;
-    let mut bytes = 0usize;
-    for &actual in actuals {
-        if actual > 0 {
-            slots += 1;
-            bytes += actual;
-        }
-    }
-    trace
-        .slots_with_data
-        .fetch_add(u64::from(slots), Ordering::Relaxed);
-    trace
-        .bytes_received
-        .fetch_add(bytes as u64, Ordering::Relaxed);
-    if slots > 0 {
-        // 首批有效数据（启动延迟 profiling：传输侧首数据批序号）。
-        let _ = trace.first_data_batch.compare_exchange(
-            0,
-            trace.batches.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        );
-    }
     // 无 Active 缓冲（队列满）：本批数据注定丢弃，直接返回（省处理时间；
     // 恢复后由帧边界事件重新获取目标、FID 自然重同步）。
     if dest.is_none() {
@@ -120,18 +79,10 @@ pub(crate) fn process_iso_batch<M: Vb2MemOps>(
         // 有目标直写 Active 缓冲；无目标传空切片 → parser 只跟踪头/边界，
         // payload 整帧丢弃。
         let mut out: &mut [u8] = dest_out(dest);
-        // 错误统计增量（只更新原子）。
-        let err_before = u64::from(session.parser.error_packet_count());
         // Linux do-while（uvc_video.c）：FID 翻转完成帧 → done + 换目标 →
         // 同一包重调（retry）；新帧第一包 payload 从不丢弃。
         let mut result = session.parser.push_packet(pkt, out);
         loop {
-            let err_now = u64::from(session.parser.error_packet_count());
-            if err_now > err_before {
-                trace
-                    .err_packets
-                    .fetch_add(err_now - err_before, Ordering::Relaxed);
-            }
             if let Some(evt) = result.evt {
                 if evt.bytes > 0 {
                     // 完整帧：入 vb2 done 队列（内建唤醒：DQBUF 阻塞与
@@ -145,12 +96,6 @@ pub(crate) fn process_iso_batch<M: Vb2MemOps>(
                             evt.bytes as u32,
                             Field::NoField as u32,
                         );
-                        if trace.frames_done.fetch_add(1, Ordering::Relaxed) == 0 {
-                            // 首帧完成（帧边界建立延迟 profiling）。
-                            trace
-                                .first_frame_batch
-                                .store(trace.batches.load(Ordering::Relaxed), Ordering::Relaxed);
-                        }
                     }
                 }
                 // 帧完成（空帧不发事件——对齐 Linux）：换目标缓冲；无则丢弃。
@@ -224,7 +169,6 @@ impl IsoBatchPipeline {
         cx: &mut Context<'_>,
         session: &mut CaptureSession,
         queue: &Vb2Queue<M>,
-        trace: &UvcTrace,
     ) -> Poll<Result<(), USBError>> {
         let mut processed = false;
         for slot in self.slots.iter_mut() {
@@ -233,14 +177,7 @@ impl IsoBatchPipeline {
             };
             match pending.poll(cx) {
                 Poll::Ready(Ok(result)) => {
-                    process_iso_batch(
-                        session,
-                        queue,
-                        &slot.buffer,
-                        &result.actuals,
-                        trace,
-                        self.slot_len,
-                    );
+                    process_iso_batch(session, queue, &slot.buffer, &result.actuals, self.slot_len);
                     slot.handle = None;
                     processed = true;
                 }

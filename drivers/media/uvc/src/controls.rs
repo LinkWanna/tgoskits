@@ -7,7 +7,7 @@
 //! 复合类型（`RECT`/`BITMASK` 偏移分割、PanTilt 8-byte、ROI 10-byte
 //! 等）因当前 `v4l2-core` 仅支持标量而暂緩，见 `UVC_CONTROL_*_DEFS` 注释。
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 
 use anyhow::anyhow;
 use crab_usb::{
@@ -18,7 +18,7 @@ use crab_usb::{
     },
 };
 use v4l2_core::ctrls::{
-    CtrlGetFn, CtrlHandler, CtrlOps, CtrlSetFn,
+    CtrlGetFn, CtrlOps, CtrlSetFn,
     class::{CameraClassCtrl, UserClassCtrl},
 };
 
@@ -339,6 +339,49 @@ fn encode_uvc_value(v: i64, size: usize) -> Option<Vec<u8>> {
 }
 
 impl<H: UvcHandle> UvcDevice<H> {
+    /// 发送单元控制请求（SET_CUR）——UVC 单元控制通道（4.2.2 类特定请求）。
+    #[allow(dead_code)]
+    pub(crate) fn send_vc_control(
+        &self,
+        unit_id: u8,
+        control_selector: u8,
+        data: &[u8],
+    ) -> Result<(), USBError> {
+        let setup = ControlSetup {
+            request_type: RequestType::Class,
+            recipient: Recipient::Interface,
+            request: RequestCode::SetCur.into(),
+            value: (control_selector as u16) << 8,
+            index: ((unit_id as u16) << 8) | self.vc_iface_num as u16,
+        };
+        self.handle
+            .control_out(setup, data)
+            .map_err(|e| anyhow!("Failed to send VC control: {e:?}"))?;
+        Ok(())
+    }
+
+    /// 读取单元控制请求（GET_CUR）——UVC 单元控制通道（4.2.2 类特定请求）。
+    #[allow(dead_code)]
+    pub(crate) fn get_vc_control(
+        &self,
+        unit_id: u8,
+        control_selector: u8,
+        request: RequestCode,
+        data: &mut [u8],
+    ) -> Result<(), USBError> {
+        let setup = ControlSetup {
+            request_type: RequestType::Class,
+            recipient: Recipient::Interface,
+            request: request.into(),
+            value: (control_selector as u16) << 8,
+            index: ((unit_id as u16) << 8) | self.vc_iface_num as u16,
+        };
+        self.handle
+            .control_in(setup, data)
+            .map_err(|e| anyhow!("Failed to get VC control: {e:?}"))?;
+        Ok(())
+    }
+
     pub(crate) fn register_controls(&mut self, units: &VcUnits) {
         // ── PU 通路 ──
         if let Some(unit_id) = units.processing_unit_id {
