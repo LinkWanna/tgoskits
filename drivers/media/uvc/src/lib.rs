@@ -429,7 +429,12 @@ impl<H: UvcHandle> UvcDevice<H> {
             let endpoint = best.ep;
             let cancel = cancel.clone();
             let in_flight = in_flight.clone();
-            let mut session = crate::stream::CaptureSession::new();
+            let expected = self
+                .current_format
+                .as_ref()
+                .filter(|fmt| !fmt.is_compressed())
+                .map(|fmt| fmt.frame_bytes());
+            let mut session = crate::stream::CaptureSession::with_expected(expected);
             let mut pipeline = IsoBatchPipeline::new(slot_len, ISO_DEPTH);
             ax_task::spawn_with_name(
                 move || {
