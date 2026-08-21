@@ -7,27 +7,38 @@
 //! 复合类型（`RECT`/`BITMASK` 偏移分割、PanTilt 8-byte、ROI 10-byte
 //! 等）因当前 `v4l2-core` 仅支持标量而暂緩，见 `UVC_CONTROL_*_DEFS` 注释。
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
-use anyhow::anyhow;
-use crab_usb::{
-    err::USBError,
-    usb_if::{
-        host::ControlSetup,
-        transfer::{Recipient, RequestType},
-    },
+use crab_usb::usb_if::{
+    host::ControlSetup,
+    transfer::{Recipient, RequestType},
 };
 use v4l2_core::ctrls::{
-    CtrlGetFn, CtrlOps, CtrlSetFn,
+    CtrlGetFn, CtrlSetFn,
     class::{CameraClassCtrl, UserClassCtrl},
 };
 
-use crate::{UvcDevice, UvcHandle, descriptors::RequestCode};
+use crate::{
+    UvcDevice, UvcHandle,
+    descriptors::{ControlCapabilities, RequestCode},
+};
+
+/// 解析出的 VC 接口单元（Camera Terminal + Processing Unit）。
+#[derive(Debug, Default)]
+pub struct VcUnits {
+    /// Camera Terminal 的 terminal id 与其 bmControls 位图。
+    pub camera_terminal_id: Option<u8>,
+    pub camera_controls: Vec<u8>,
+    /// Processing Unit 的 unit id 与其 bmControls 位图。
+    pub processing_unit_id: Option<u8>,
+    pub processing_controls: Vec<u8>,
+}
 
 /// 摄像头终端控制选择器 (A.9.4)
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum CameraTerminalControl {
+enum CameraTerminalControl {
     Undefined            = 0x00,
     ScanningMode         = 0x01,
     AeMode               = 0x02,
@@ -52,9 +63,10 @@ pub enum CameraTerminalControl {
 }
 
 /// 处理单元控制选择器 (A.9.5)
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum ProcessingUnitControl {
+enum ProcessingUnitControl {
     Undefined           = 0x00,
     BacklightCompensation = 0x01,
     Brightness          = 0x02,
@@ -88,9 +100,9 @@ const EXPOSURE_AUTO_MENU: &[&str] = &[
     "Auto Mode",
 ];
 
-/// UVC 控件的 V4L2 类型（替代旧 `is_bool`/`menu_items` 布尔陷阱）。
+/// UVC 控件的 V4L2 类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UvcCtrlType {
+enum UvcCtrlType {
     Integer,
     Boolean,
     Menu(&'static [&'static str]),
@@ -98,22 +110,10 @@ pub enum UvcCtrlType {
 }
 
 /// Processing Unit 控件定义：V4L2 CID ↔ UVC PU (selector, size)。
-pub struct UvcPuControlDef {
-    pub cid: UserClassCtrl,
+struct UvcControlDef {
+    pub cid: u32,
     pub name: &'static str,
-    pub selector: ProcessingUnitControl,
-    /// 值字节数（1/2/4；3/8/10 等复合类型暂不支持）。
-    pub size: usize,
-    /// bmControls 位图中的 bit（= selector - 1）。
-    pub ctrl_bit: u8,
-    pub ty: UvcCtrlType,
-}
-
-/// Camera Terminal 控件定义：V4L2 CID ↔ UVC CT (selector, size)。
-pub struct UvcCtControlDef {
-    pub cid: CameraClassCtrl,
-    pub name: &'static str,
-    pub selector: CameraTerminalControl,
+    pub selector: u8,
     pub size: usize,
     pub ctrl_bit: u8,
     pub ty: UvcCtrlType,
@@ -122,101 +122,101 @@ pub struct UvcCtControlDef {
 /// PU 控件映射表（UVC 1.5 Table A-13，Linux `uvc_ctrls[]` PU 部分）
 ///
 /// 仅收录 `size ∈ {1,2,4}` 且在 Linux `uvc_ctrl_mappings[]` 中已映射为 V4L2 的 1:1 项。
-pub const UVC_CONTROL_PU_DEFS: &[UvcPuControlDef] = &[
-    UvcPuControlDef {
-        cid: UserClassCtrl::Brightness,
+const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
+    UvcControlDef {
+        cid: UserClassCtrl::Brightness as u32,
         name: "Brightness",
-        selector: ProcessingUnitControl::Brightness,
+        selector: ProcessingUnitControl::Brightness as u8,
         size: 2,
         ctrl_bit: 0,
         ty: UvcCtrlType::Integer,
     },
-    UvcPuControlDef {
-        cid: UserClassCtrl::Contrast,
+    UvcControlDef {
+        cid: UserClassCtrl::Contrast as u32,
         name: "Contrast",
-        selector: ProcessingUnitControl::Contrast,
+        selector: ProcessingUnitControl::Contrast as u8,
         size: 2,
         ctrl_bit: 1,
         ty: UvcCtrlType::Integer,
     },
-    UvcPuControlDef {
-        cid: UserClassCtrl::Hue,
+    UvcControlDef {
+        cid: UserClassCtrl::Hue as u32,
         name: "Hue",
-        selector: ProcessingUnitControl::Hue,
+        selector: ProcessingUnitControl::Hue as u8,
         size: 2,
         ctrl_bit: 2,
         ty: UvcCtrlType::Integer,
     },
-    UvcPuControlDef {
-        cid: UserClassCtrl::Saturation,
+    UvcControlDef {
+        cid: UserClassCtrl::Saturation as u32,
         name: "Saturation",
-        selector: ProcessingUnitControl::Saturation,
+        selector: ProcessingUnitControl::Saturation as u8,
         size: 2,
         ctrl_bit: 3,
         ty: UvcCtrlType::Integer,
     },
-    UvcPuControlDef {
-        cid: UserClassCtrl::Sharpness,
+    UvcControlDef {
+        cid: UserClassCtrl::Sharpness as u32,
         name: "Sharpness",
-        selector: ProcessingUnitControl::Sharpness,
+        selector: ProcessingUnitControl::Sharpness as u8,
         size: 2,
         ctrl_bit: 4,
         ty: UvcCtrlType::Integer,
     },
-    UvcPuControlDef {
-        cid: UserClassCtrl::Gamma,
+    UvcControlDef {
+        cid: UserClassCtrl::Gamma as u32,
         name: "Gamma",
-        selector: ProcessingUnitControl::Gamma,
+        selector: ProcessingUnitControl::Gamma as u8,
         size: 2,
         ctrl_bit: 5,
         ty: UvcCtrlType::Integer,
     },
-    UvcPuControlDef {
-        cid: UserClassCtrl::WhiteBalanceTemperature,
+    UvcControlDef {
+        cid: UserClassCtrl::WhiteBalanceTemperature as u32,
         name: "White Balance Temperature",
-        selector: ProcessingUnitControl::WhiteBalanceTemperature,
+        selector: ProcessingUnitControl::WhiteBalanceTemperature as u8,
         size: 2,
         ctrl_bit: 6,
         ty: UvcCtrlType::Integer,
     },
     // White Balance Component (4-byte, Red@0 + Blue@16) 在 Linux 中拆为
     // V4L2_CID_RED_BALANCE / BLUE_BALANCE（offset 0/16），当前标量框架暂緩。
-    UvcPuControlDef {
-        cid: UserClassCtrl::BacklightCompensation,
+    UvcControlDef {
+        cid: UserClassCtrl::BacklightCompensation as u32,
         name: "Backlight Compensation",
-        selector: ProcessingUnitControl::BacklightCompensation,
+        selector: ProcessingUnitControl::BacklightCompensation as u8,
         size: 2,
         ctrl_bit: 8,
         ty: UvcCtrlType::Integer,
     },
-    UvcPuControlDef {
-        cid: UserClassCtrl::Gain,
+    UvcControlDef {
+        cid: UserClassCtrl::Gain as u32,
         name: "Gain",
-        selector: ProcessingUnitControl::Gain,
+        selector: ProcessingUnitControl::Gain as u8,
         size: 2,
         ctrl_bit: 9,
         ty: UvcCtrlType::Integer,
     },
-    UvcPuControlDef {
-        cid: UserClassCtrl::PowerLineFrequency,
+    UvcControlDef {
+        cid: UserClassCtrl::PowerLineFrequency as u32,
         name: "Power Line Frequency",
-        selector: ProcessingUnitControl::PowerLineFrequency,
+        selector: ProcessingUnitControl::PowerLineFrequency as u8,
         size: 1,
         ctrl_bit: 10,
         ty: UvcCtrlType::Menu(POWER_LINE_FREQ_MENU),
     },
-    UvcPuControlDef {
-        cid: UserClassCtrl::HueAuto,
+    UvcControlDef {
+        cid: UserClassCtrl::HueAuto as u32,
         name: "Hue Auto",
-        selector: ProcessingUnitControl::HueAuto,
+        selector: ProcessingUnitControl::HueAuto as u8,
         size: 1,
         ctrl_bit: 11,
         ty: UvcCtrlType::Boolean,
     },
-    UvcPuControlDef {
-        cid: UserClassCtrl::AutoWhiteBalance,
+    UvcControlDef {
+        cid: UserClassCtrl::AutoWhiteBalance as u32,
         name: "Auto White Balance",
-        selector: ProcessingUnitControl::WhiteBalanceTemperatureAuto,
+        selector: ProcessingUnitControl::WhiteBalanceTemperatureAuto as u8,
         size: 1,
         ctrl_bit: 12,
         ty: UvcCtrlType::Boolean,
@@ -226,67 +226,67 @@ pub const UVC_CONTROL_PU_DEFS: &[UvcPuControlDef] = &[
 ];
 
 /// CT 控件映射表（UVC 1.5 Table A-12，Linux `uvc_ctrls[]` CT 部分）
-pub const UVC_CONTROL_CT_DEFS: &[UvcCtControlDef] = &[
-    UvcCtControlDef {
-        cid: CameraClassCtrl::ExposureAuto,
+const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
+    UvcControlDef {
+        cid: CameraClassCtrl::ExposureAuto as u32,
         name: "Exposure, Auto",
-        selector: CameraTerminalControl::AeMode,
+        selector: CameraTerminalControl::AeMode as u8,
         size: 1,
         ctrl_bit: 1,
         ty: UvcCtrlType::Menu(EXPOSURE_AUTO_MENU),
     },
-    UvcCtControlDef {
-        cid: CameraClassCtrl::ExposureAutoPriority,
+    UvcControlDef {
+        cid: CameraClassCtrl::ExposureAutoPriority as u32,
         name: "Exposure, Auto Priority",
-        selector: CameraTerminalControl::AePriority,
+        selector: CameraTerminalControl::AePriority as u8,
         size: 1,
         ctrl_bit: 2,
         ty: UvcCtrlType::Boolean,
     },
-    UvcCtControlDef {
-        cid: CameraClassCtrl::ExposureAbsolute,
+    UvcControlDef {
+        cid: CameraClassCtrl::ExposureAbsolute as u32,
         name: "Exposure (Absolute)",
-        selector: CameraTerminalControl::ExposureTimeAbsolute,
+        selector: CameraTerminalControl::ExposureTimeAbsolute as u8,
         size: 4,
         ctrl_bit: 3,
         ty: UvcCtrlType::Integer,
     },
-    UvcCtControlDef {
-        cid: CameraClassCtrl::FocusAbsolute,
+    UvcControlDef {
+        cid: CameraClassCtrl::FocusAbsolute as u32,
         name: "Focus (Absolute)",
-        selector: CameraTerminalControl::FocusAbsolute,
+        selector: CameraTerminalControl::FocusAbsolute as u8,
         size: 2,
         ctrl_bit: 5,
         ty: UvcCtrlType::Integer,
     },
-    UvcCtControlDef {
-        cid: CameraClassCtrl::FocusAuto,
+    UvcControlDef {
+        cid: CameraClassCtrl::FocusAuto as u32,
         name: "Focus, Auto",
-        selector: CameraTerminalControl::FocusAuto,
+        selector: CameraTerminalControl::FocusAuto as u8,
         size: 1,
         ctrl_bit: 17,
         ty: UvcCtrlType::Boolean,
     },
-    UvcCtControlDef {
-        cid: CameraClassCtrl::IrisAbsolute,
+    UvcControlDef {
+        cid: CameraClassCtrl::IrisAbsolute as u32,
         name: "Iris, Absolute",
-        selector: CameraTerminalControl::IrisAbsolute,
+        selector: CameraTerminalControl::IrisAbsolute as u8,
         size: 2,
         ctrl_bit: 7,
         ty: UvcCtrlType::Integer,
     },
-    UvcCtControlDef {
-        cid: CameraClassCtrl::ZoomAbsolute,
+    UvcControlDef {
+        cid: CameraClassCtrl::ZoomAbsolute as u32,
         name: "Zoom, Absolute",
-        selector: CameraTerminalControl::ZoomAbsolute,
+        selector: CameraTerminalControl::ZoomAbsolute as u8,
         size: 2,
         ctrl_bit: 9,
         ty: UvcCtrlType::Integer,
     },
-    UvcCtControlDef {
-        cid: CameraClassCtrl::Privacy,
+    UvcControlDef {
+        cid: CameraClassCtrl::Privacy as u32,
         name: "Privacy",
-        selector: CameraTerminalControl::Privacy,
+        selector: CameraTerminalControl::Privacy as u8,
         size: 1,
         ctrl_bit: 18,
         ty: UvcCtrlType::Boolean,
@@ -300,19 +300,8 @@ pub const UVC_CONTROL_CT_DEFS: &[UvcCtControlDef] = &[
     // - CT_EXPOSURE_TIME_RELATIVE (1-byte) / SCANNING_MODE 等在 Linux 未映射为 V4L2
 ];
 
-/// 解析出的 VC 接口单元（Camera Terminal + Processing Unit）。
-#[derive(Debug, Default)]
-pub struct VcUnits {
-    /// Camera Terminal 的 terminal id 与其 bmControls 位图。
-    pub camera_terminal_id: Option<u8>,
-    pub camera_controls: Vec<u8>,
-    /// Processing Unit 的 unit id 与其 bmControls 位图。
-    pub processing_unit_id: Option<u8>,
-    pub processing_controls: Vec<u8>,
-}
-
 /// 检查 bmControls 位图是否置位（UVC 规范：bit N 位于 byte N/8 的位 N%8）。
-pub fn control_supported(bitmap: &[u8], bit: u8) -> bool {
+fn control_supported(bitmap: &[u8], bit: u8) -> bool {
     let byte = (bit / 8) as usize;
     let b = bit % 8;
     bitmap.get(byte).is_some_and(|v| (v >> b) & 1 == 1)
@@ -338,277 +327,188 @@ fn encode_uvc_value(v: i64, size: usize) -> Option<Vec<u8>> {
     }
 }
 
-impl<H: UvcHandle> UvcDevice<H> {
-    /// 发送单元控制请求（SET_CUR）——UVC 单元控制通道（4.2.2 类特定请求）。
-    #[allow(dead_code)]
-    pub(crate) fn send_vc_control(
-        &self,
-        unit_id: u8,
-        control_selector: u8,
-        data: &[u8],
-    ) -> Result<(), USBError> {
+/// 通用控件注册路径：GET_INFO 门控 + 范围读取 + 硬件代理创建。
+///
+/// 由 PU/CT 各自循环调用，`log_tag` 仅用于日志区分（`\"PU\"`/`\"CT\"`）。
+#[allow(clippy::too_many_arguments)]
+fn register_control<H: UvcHandle>(
+    ctrls: &mut v4l2_core::ctrls::CtrlHandler,
+    handle: &Arc<H>,
+    vc_iface: u8,
+    unit_id: u8,
+    bitmap: &[u8],
+    def: &UvcControlDef,
+    log_tag: &str,
+) {
+    let cid_raw = def.cid;
+    let name = def.name;
+    let sel_raw = def.selector;
+    let size = def.size;
+    let ctrl_bit = def.ctrl_bit;
+    let ty = def.ty;
+    if ctrls.find(cid_raw).is_some() {
+        return;
+    }
+    if !control_supported(bitmap, ctrl_bit) {
+        return;
+    }
+
+    // ── GET_INFO 门控：先查 GetInfo 再决定是否发 GetMin/Max ──
+    let info_byte = {
+        let mut buf = vec![0u8; 1];
+        let setup = ControlSetup {
+            request_type: RequestType::Class,
+            recipient: Recipient::Interface,
+            request: RequestCode::GetInfo.into(),
+            value: (sel_raw as u16) << 8,
+            index: ((unit_id as u16) << 8) | vc_iface as u16,
+        };
+        match handle.control_in(setup, &mut buf) {
+            Ok(_) => buf[0],
+            Err(e) => {
+                log::debug!("uvc: {log_tag} {name} GetInfo err sel {sel_raw:#x}: {e:?}");
+                return;
+            }
+        }
+    };
+    let caps = ControlCapabilities::from_bits_truncate(info_byte);
+    if caps.contains(ControlCapabilities::DISABLED) {
+        log::debug!("uvc: {log_tag} {name} disabled info={info_byte:#x}");
+        return;
+    }
+    if !caps.contains(ControlCapabilities::GET) {
+        log::debug!("uvc: {log_tag} {name} no GET support info={info_byte:#x}");
+        return;
+    }
+
+    let read = {
+        let handle = handle.clone();
+        move |request: RequestCode| -> Option<i64> {
+            let mut buf = vec![0u8; size];
+            let setup = ControlSetup {
+                request_type: RequestType::Class,
+                recipient: Recipient::Interface,
+                request: request.into(),
+                value: (sel_raw as u16) << 8,
+                index: ((unit_id as u16) << 8) | vc_iface as u16,
+            };
+            handle.control_in(setup, &mut buf).ok()?;
+            decode_uvc_value(&buf)
+        }
+    };
+
+    let h = handle.clone();
+    let get_fn: CtrlGetFn = Box::new(move || {
+        let mut buf = vec![0u8; size];
+        let setup = ControlSetup {
+            request_type: RequestType::Class,
+            recipient: Recipient::Interface,
+            request: RequestCode::GetCur.into(),
+            value: (sel_raw as u16) << 8,
+            index: ((unit_id as u16) << 8) | vc_iface as u16,
+        };
+        h.control_in(setup, &mut buf)
+            .map_err(|_e| v4l2_core::V4l2Error::Io)?;
+        let raw = decode_uvc_value(&buf).ok_or(v4l2_core::V4l2Error::Io)?;
+        if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
+            Ok(raw.trailing_zeros() as i64)
+        } else {
+            Ok(raw)
+        }
+    });
+
+    let h = handle.clone();
+    let set_fn: CtrlSetFn = Box::new(move |v| {
+        let v = if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
+            1i64 << v
+        } else {
+            v
+        };
+        let buf = encode_uvc_value(v, size).ok_or(v4l2_core::V4l2Error::Io)?;
         let setup = ControlSetup {
             request_type: RequestType::Class,
             recipient: Recipient::Interface,
             request: RequestCode::SetCur.into(),
-            value: (control_selector as u16) << 8,
-            index: ((unit_id as u16) << 8) | self.vc_iface_num as u16,
+            value: (sel_raw as u16) << 8,
+            index: ((unit_id as u16) << 8) | vc_iface as u16,
         };
-        self.handle
-            .control_out(setup, data)
-            .map_err(|e| anyhow!("Failed to send VC control: {e:?}"))?;
-        Ok(())
-    }
+        h.control_out(setup, &buf)
+            .map_err(|_| v4l2_core::V4l2Error::Io)?;
+        Ok(v)
+    });
 
-    /// 读取单元控制请求（GET_CUR）——UVC 单元控制通道（4.2.2 类特定请求）。
-    #[allow(dead_code)]
-    pub(crate) fn get_vc_control(
-        &self,
-        unit_id: u8,
-        control_selector: u8,
-        request: RequestCode,
-        data: &mut [u8],
-    ) -> Result<(), USBError> {
-        let setup = ControlSetup {
-            request_type: RequestType::Class,
-            recipient: Recipient::Interface,
-            request: request.into(),
-            value: (control_selector as u16) << 8,
-            index: ((unit_id as u16) << 8) | self.vc_iface_num as u16,
-        };
-        self.handle
-            .control_in(setup, data)
-            .map_err(|e| anyhow!("Failed to get VC control: {e:?}"))?;
-        Ok(())
-    }
+    let ops = v4l2_core::ctrls::CtrlOps {
+        get: Some(get_fn),
+        try_ctrl: None,
+        set: set_fn,
+    };
 
+    let res = match ty {
+        UvcCtrlType::Integer => {
+            let Some(min) = read(RequestCode::GetMin) else {
+                return;
+            };
+            let Some(max) = read(RequestCode::GetMax) else {
+                return;
+            };
+            let step = read(RequestCode::GetRes).unwrap_or(1).max(1);
+            let default = read(RequestCode::GetDef).unwrap_or(min);
+            ctrls.new_int(cid_raw, name, min, max, step, default, Some(ops))
+        }
+        UvcCtrlType::Boolean => {
+            let default = read(RequestCode::GetDef).unwrap_or(0);
+            ctrls.new_bool(cid_raw, name, default != 0, Some(ops))
+        }
+        UvcCtrlType::Menu(qmenu) => {
+            let default = read(RequestCode::GetDef).unwrap_or(0);
+            let default_idx = if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
+                (default.trailing_zeros() as i64).clamp(0, qmenu.len() as i64 - 1) as u32
+            } else {
+                (default as u32).min(qmenu.len() as u32 - 1)
+            };
+            ctrls.new_menu(
+                cid_raw,
+                name,
+                qmenu.len() as u32,
+                default_idx,
+                qmenu,
+                Some(ops),
+            )
+        }
+        UvcCtrlType::Button => ctrls.new_button(cid_raw, name, Some(ops)),
+    };
+    if let Err(e) = res {
+        log::warn!("uvc: skip {log_tag} {name} (0x{cid_raw:08x}): {e:?}");
+    }
+}
+
+impl<H: UvcHandle> UvcDevice<H> {
     pub(crate) fn register_controls(&mut self, units: &VcUnits) {
-        // ── PU 通路 ──
+        let vc_iface = self.vc_iface_num;
         if let Some(unit_id) = units.processing_unit_id {
             for def in UVC_CONTROL_PU_DEFS {
-                let cid_raw = def.cid as u32;
-                let sel_raw = def.selector as u8;
-                let size = def.size;
-                let ctrl_bit = def.ctrl_bit;
-                let ty = def.ty;
-                let name = def.name;
-                if self.ctrls.find(cid_raw).is_some() {
-                    continue;
-                }
-                if !control_supported(&units.processing_controls, ctrl_bit) {
-                    continue;
-                }
-
-                let handle = self.handle.clone();
-                let vc_iface = self.vc_iface_num;
-                let read = {
-                    let handle = handle.clone();
-                    move |request: RequestCode| -> Option<i64> {
-                        let mut buf = vec![0u8; size];
-                        let setup = ControlSetup {
-                            request_type: RequestType::Class,
-                            recipient: Recipient::Interface,
-                            request: request.into(),
-                            value: (sel_raw as u16) << 8,
-                            index: ((unit_id as u16) << 8) | vc_iface as u16,
-                        };
-                        handle.control_in(setup, &mut buf).ok()?;
-                        decode_uvc_value(&buf)
-                    }
-                };
-
-                let h = handle.clone();
-                let get_fn: CtrlGetFn = Box::new(move || {
-                    let mut buf = vec![0u8; size];
-                    let setup = ControlSetup {
-                        request_type: RequestType::Class,
-                        recipient: Recipient::Interface,
-                        request: RequestCode::GetCur.into(),
-                        value: (sel_raw as u16) << 8,
-                        index: ((unit_id as u16) << 8) | vc_iface as u16,
-                    };
-                    h.control_in(setup, &mut buf)
-                        .map_err(|_e| v4l2_core::V4l2Error::Io)?;
-                    decode_uvc_value(&buf).ok_or(v4l2_core::V4l2Error::Io)
-                });
-
-                let h = handle.clone();
-                let set_fn: CtrlSetFn = Box::new(move |v| {
-                    let buf = encode_uvc_value(v, size).ok_or(v4l2_core::V4l2Error::Io)?;
-                    let setup = ControlSetup {
-                        request_type: RequestType::Class,
-                        recipient: Recipient::Interface,
-                        request: RequestCode::SetCur.into(),
-                        value: (sel_raw as u16) << 8,
-                        index: ((unit_id as u16) << 8) | vc_iface as u16,
-                    };
-                    h.control_out(setup, &buf)
-                        .map_err(|_| v4l2_core::V4l2Error::Io)?;
-                    Ok(v)
-                });
-
-                let ops = CtrlOps {
-                    get: Some(get_fn),
-                    try_ctrl: None,
-                    set: set_fn,
-                };
-
-                let res = match ty {
-                    UvcCtrlType::Integer => {
-                        let Some(min) = read(RequestCode::GetMin) else {
-                            continue;
-                        };
-                        let Some(max) = read(RequestCode::GetMax) else {
-                            continue;
-                        };
-                        let step = read(RequestCode::GetRes).unwrap_or(1).max(1);
-                        let default = read(RequestCode::GetDef).unwrap_or(min);
-                        self.ctrls
-                            .new_int(cid_raw, name, min, max, step, default, Some(ops))
-                    }
-                    UvcCtrlType::Boolean => {
-                        let default = read(RequestCode::GetDef).unwrap_or(0);
-                        self.ctrls.new_bool(cid_raw, name, default != 0, Some(ops))
-                    }
-                    UvcCtrlType::Menu(qmenu) => {
-                        let default = read(RequestCode::GetDef).unwrap_or(0);
-                        let default_idx = (default as u32).min(qmenu.len() as u32 - 1);
-                        self.ctrls.new_menu(
-                            cid_raw,
-                            name,
-                            qmenu.len() as u32,
-                            default_idx,
-                            qmenu,
-                            Some(ops),
-                        )
-                    }
-                    UvcCtrlType::Button => self.ctrls.new_button(cid_raw, name, Some(ops)),
-                };
-                if let Err(e) = res {
-                    log::warn!("uvc: skip PU {} (0x{:08x}): {:?}", name, cid_raw, e);
-                }
+                register_control(
+                    &mut self.ctrls,
+                    &self.handle,
+                    vc_iface,
+                    unit_id,
+                    &units.processing_controls,
+                    def,
+                    "PU",
+                );
             }
         }
-
-        // ── CT 通路 ──
         if let Some(unit_id) = units.camera_terminal_id {
             for def in UVC_CONTROL_CT_DEFS {
-                let cid_raw = def.cid as u32;
-                let sel_raw = def.selector as u8;
-                let size = def.size;
-                let ctrl_bit = def.ctrl_bit;
-                let ty = def.ty;
-                let name = def.name;
-                if self.ctrls.find(cid_raw).is_some() {
-                    continue;
-                }
-                if !control_supported(&units.camera_controls, ctrl_bit) {
-                    continue;
-                }
-
-                let handle = self.handle.clone();
-                let vc_iface = self.vc_iface_num;
-                let read = {
-                    let handle = handle.clone();
-                    move |request: RequestCode| -> Option<i64> {
-                        let mut buf = vec![0u8; size];
-                        let setup = ControlSetup {
-                            request_type: RequestType::Class,
-                            recipient: Recipient::Interface,
-                            request: request.into(),
-                            value: (sel_raw as u16) << 8,
-                            index: ((unit_id as u16) << 8) | vc_iface as u16,
-                        };
-                        handle.control_in(setup, &mut buf).ok()?;
-                        decode_uvc_value(&buf)
-                    }
-                };
-
-                let h = handle.clone();
-                let get_fn: CtrlGetFn = Box::new(move || {
-                    let mut buf = vec![0u8; size];
-                    let setup = ControlSetup {
-                        request_type: RequestType::Class,
-                        recipient: Recipient::Interface,
-                        request: RequestCode::GetCur.into(),
-                        value: (sel_raw as u16) << 8,
-                        index: ((unit_id as u16) << 8) | vc_iface as u16,
-                    };
-                    h.control_in(setup, &mut buf)
-                        .map_err(|_e| v4l2_core::V4l2Error::Io)?;
-                    let raw = decode_uvc_value(&buf).ok_or(v4l2_core::V4l2Error::Io)?;
-                    if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
-                        Ok(raw.trailing_zeros() as i64)
-                    } else {
-                        Ok(raw)
-                    }
-                });
-
-                let h = handle.clone();
-                let set_fn: CtrlSetFn = Box::new(move |v| {
-                    let v = if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
-                        1i64 << v
-                    } else {
-                        v
-                    };
-                    let buf = encode_uvc_value(v, size).ok_or(v4l2_core::V4l2Error::Io)?;
-                    let setup = ControlSetup {
-                        request_type: RequestType::Class,
-                        recipient: Recipient::Interface,
-                        request: RequestCode::SetCur.into(),
-                        value: (sel_raw as u16) << 8,
-                        index: ((unit_id as u16) << 8) | vc_iface as u16,
-                    };
-                    h.control_out(setup, &buf)
-                        .map_err(|_| v4l2_core::V4l2Error::Io)?;
-                    Ok(v)
-                });
-
-                let ops = CtrlOps {
-                    get: Some(get_fn),
-                    try_ctrl: None,
-                    set: set_fn,
-                };
-
-                let res = match ty {
-                    UvcCtrlType::Integer => {
-                        let Some(min) = read(RequestCode::GetMin) else {
-                            continue;
-                        };
-                        let Some(max) = read(RequestCode::GetMax) else {
-                            continue;
-                        };
-                        let step = read(RequestCode::GetRes).unwrap_or(1).max(1);
-                        let default = read(RequestCode::GetDef).unwrap_or(min);
-                        self.ctrls
-                            .new_int(cid_raw, name, min, max, step, default, Some(ops))
-                    }
-                    UvcCtrlType::Boolean => {
-                        let default = read(RequestCode::GetDef).unwrap_or(0);
-                        self.ctrls.new_bool(cid_raw, name, default != 0, Some(ops))
-                    }
-                    UvcCtrlType::Menu(qmenu) => {
-                        let default = read(RequestCode::GetDef).unwrap_or(0);
-                        let default_idx = if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
-                            (default.trailing_zeros() as i64).clamp(0, qmenu.len() as i64 - 1)
-                                as u32
-                        } else {
-                            (default as u32).min(qmenu.len() as u32 - 1)
-                        };
-                        self.ctrls.new_menu(
-                            cid_raw,
-                            name,
-                            qmenu.len() as u32,
-                            default_idx,
-                            qmenu,
-                            Some(ops),
-                        )
-                    }
-                    UvcCtrlType::Button => self.ctrls.new_button(cid_raw, name, Some(ops)),
-                };
-                if let Err(e) = res {
-                    log::warn!("uvc: skip CT {} (0x{:08x}): {:?}", name, cid_raw, e);
-                }
+                register_control(
+                    &mut self.ctrls,
+                    &self.handle,
+                    vc_iface,
+                    unit_id,
+                    &units.camera_controls,
+                    def,
+                    "CT",
+                );
             }
         }
     }
