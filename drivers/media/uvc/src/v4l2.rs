@@ -10,10 +10,9 @@ use v4l2_core::{
     IoctlOps, V4L2DriverOps, V4l2Error,
     filehandler::V4l2Fh,
     interface::{
-        buffer,
+        BufType, Field, Memory, Timeval, buffer,
         capability::{Capabilities, Capability},
         colorspace,
-        {BufType, Field, Memory, Timeval},
         event::EventSubscription,
         format::{
             self, Fmtdesc, Format, FrameIntervalEnum, FrameIntervalType, FrameSizeEnum,

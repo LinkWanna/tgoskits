@@ -6,8 +6,8 @@
 use v4l2_core::{
     error::V4l2Error,
     interface::{
-        colorspace::{Colorspace, Quantization, XferFunc, YcbcrEncoding},
         Field,
+        colorspace::{Colorspace, Quantization, XferFunc, YcbcrEncoding},
         format::{FmtFlag, Fmtdesc, Format},
     },
 };

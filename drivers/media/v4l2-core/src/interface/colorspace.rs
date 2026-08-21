@@ -2,30 +2,18 @@
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Colorspace {
-    /// 默认色彩空间（由驱动自行决定）。
-    Default     = 0,
-    /// SMPTE 170M：广播电视 NTSC/PAL 标清（SDTV）。
-    Smpte170m   = 1,
-    /// 已废弃的 1998 年前 SMPTE 240M 高清（HDTV）。
-    Smpte240m   = 2,
-    /// Rec.709：高清（HDTV）。
-    Rec709      = 3,
-    /// NTSC 1953 色彩空间。
-    System470M  = 5,
-    /// EBU Tech 3213 PAL/SECAM。
-    System470Bg = 6,
-    /// 动态 JPEG（Motion-JPEG）。
-    Jpeg        = 7,
-    /// sRGB。
-    Srgb        = 8,
-    /// opRGB。
-    Oprgb       = 9,
-    /// BT.2020，超高清（UHDTV）。
-    Bt2020      = 10,
-    /// 未经处理的原始图像。
-    Raw         = 11,
-    /// DCI-P3，影院投影机。
-    DciP3       = 12,
+    Default     = 0,  // 默认色彩空间（由驱动自行决定）。
+    Smpte170m   = 1,  // SMPTE 170M：广播电视 NTSC/PAL 标清（SDTV）。
+    Smpte240m   = 2,  // SMPTE 240M：已废弃的高清（HDTV）。
+    Rec709      = 3,  // Rec.709：高清（HDTV）。
+    System470M  = 5,  // NTSC 1953 色彩空间。
+    System470Bg = 6,  // EBU Tech 3213 PAL/SECAM。
+    Jpeg        = 7,  // 动态 JPEG（Motion-JPEG）。
+    Srgb        = 8,  // sRGB。
+    Oprgb       = 9,  // opRGB。
+    Bt2020      = 10, // BT.2020，超高清（UHDTV）。
+    Raw         = 11, // 未经处理的原始图像。
+    DciP3       = 12, // DCI-P3，影院投影机。
 }
 
 /// 传输函数。
@@ -48,30 +36,20 @@ pub enum XferFunc {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum YcbcrEncoding {
     Default        = 0,
-    /// ITU-R 601 —— 标清（SDTV）。
-    Rec601         = 1,
-    /// Rec. 709 —— 高清（HDTV）。
-    Rec709         = 2,
-    /// ITU-R 601/EN 61966-2-4 扩展色域 —— 标清（SDTV）。
-    Xv601          = 3,
-    /// Rec. 709/EN 61966-2-4 扩展色域 —— 高清（HDTV）。
-    Xv709          = 4,
-    /// BT.2020 非常亮度（Non-constant Luminance）Y'CbCr。
-    Bt2020         = 6,
-    /// BT.2020 恒定亮度（Constant Luminance）Y'CbcCrc。
-    Bt2020ConstLum = 7,
-    /// SMPTE 240M —— 已废弃的高清（HDTV）。
-    Smpte240m      = 8,
+    Rec601         = 1, // ITU-R 601 —— 标清（SDTV）。
+    Rec709         = 2, // Rec. 709 —— 高清（HDTV）。
+    Xv601          = 3, // ITU-R 601/EN 61966-2-4 扩展色域 —— 标清（SDTV）。
+    Xv709          = 4, // Rec. 709/EN 61966-2-4 扩展色域 —— 高清（HDTV）。
+    Bt2020         = 6, // BT.2020 非常亮度（Non-constant Luminance）Y'CbCr。
+    Bt2020ConstLum = 7, // BT.2020 恒定亮度（Constant Luminance）Y'CbcCrc。
 }
 
 /// HSV 编码。
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HsvEncoding {
-    /// 色相映射到 0 - 179。
-    Hue180 = 128,
-    /// 色相映射到 0-255。
-    Hue256 = 129,
+    Hue180 = 128, // 色相映射到 0 - 179
+    Hue256 = 129, // 色相映射到 0-255。
 }
 
 /// 量化范围。

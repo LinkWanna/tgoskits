@@ -8,10 +8,10 @@
 pub mod class;
 pub mod handler;
 
-pub use handler::*;
-
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicI64, Ordering};
+
+pub use handler::*;
 
 use crate::{Result, V4l2Error, interface::ctrl::CtrlFlags};
 

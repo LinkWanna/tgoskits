@@ -70,74 +70,7 @@ pub enum VsDescriptorSubtype {
     FormatH264Simulcast = 0x15,
 }
 
-/// UVC 描述符类型——互斥值。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum DescriptorType {
-    Undefined     = 0x00,
-    Device        = 0x01,
-    Configuration = 0x02,
-    String        = 0x03,
-    Interface     = 0x04,
-    Endpoint      = 0x05,
-    CsInterface   = 0x24,
-    CsEndpoint    = 0x25,
-}
-
-/// 摄像头终端控制选择器 (A.9.4)——互斥值。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum CameraTerminalControl {
-    Undefined            = 0x00,
-    ScanningMode         = 0x01,
-    AeMode               = 0x02,
-    AePriority           = 0x03,
-    ExposureTimeAbsolute = 0x04,
-    ExposureTimeRelative = 0x05,
-    FocusAbsolute        = 0x06,
-    FocusRelative        = 0x07,
-    FocusAuto            = 0x08,
-    IrisAbsolute         = 0x09,
-    IrisRelative         = 0x0A,
-    ZoomAbsolute         = 0x0B,
-    ZoomRelative         = 0x0C,
-    PantiltAbsolute      = 0x0D,
-    PantiltRelative      = 0x0E,
-    RollAbsolute         = 0x0F,
-    RollRelative         = 0x10,
-    Privacy              = 0x11,
-    FocusSimple          = 0x12,
-    DigitalWindow        = 0x13,
-    RegionOfInterest     = 0x14,
-}
-
-/// 处理单元控制选择器 (A.9.5)——互斥值。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum ProcessingUnitControl {
-    Undefined           = 0x00,
-    BacklightCompensation = 0x01,
-    Brightness          = 0x02,
-    Contrast            = 0x03,
-    Gain                = 0x04,
-    PowerLineFrequency  = 0x05,
-    Hue                 = 0x06,
-    Saturation          = 0x07,
-    Sharpness           = 0x08,
-    Gamma               = 0x09,
-    WhiteBalanceTemperature = 0x0A,
-    WhiteBalanceTemperatureAuto = 0x0B,
-    WhiteBalanceComponent = 0x0C,
-    WhiteBalanceComponentAuto = 0x0D,
-    DigitalMultiplier   = 0x0E,
-    DigitalMultiplierLimit = 0x0F,
-    HueAuto             = 0x10,
-    AnalogVideoStandard = 0x11,
-    AnalogLockStatus    = 0x12,
-    ContrastAuto        = 0x13,
-}
-
-/// VideoStreaming 接口控制选择器 (A.9.7)——互斥值。
+/// VideoStreaming 接口控制选择器 (A.9.7)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum VideoStreamingControl {
@@ -151,6 +84,20 @@ pub enum VideoStreamingControl {
     GenerateKeyFrame   = 0x07,
     UpdateFrameSegment = 0x08,
     SyncDelay          = 0x09,
+}
+
+/// UVC 描述符类型——互斥值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DescriptorType {
+    Undefined     = 0x00,
+    Device        = 0x01,
+    Configuration = 0x02,
+    String        = 0x03,
+    Interface     = 0x04,
+    Endpoint      = 0x05,
+    CsInterface   = 0x24,
+    CsEndpoint    = 0x25,
 }
 
 /// 终端类型 (B.1-B.4)
@@ -314,14 +261,14 @@ impl From<InterfaceSubclass> for u8 {
     }
 }
 
-impl From<DescriptorType> for u8 {
-    fn from(v: DescriptorType) -> u8 {
+impl From<VideoStreamingControl> for u8 {
+    fn from(v: VideoStreamingControl) -> u8 {
         v as u8
     }
 }
 
-impl From<VideoStreamingControl> for u8 {
-    fn from(v: VideoStreamingControl) -> u8 {
+impl From<DescriptorType> for u8 {
+    fn from(v: DescriptorType) -> u8 {
         v as u8
     }
 }

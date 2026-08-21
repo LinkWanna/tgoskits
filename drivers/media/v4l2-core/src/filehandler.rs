@@ -29,7 +29,7 @@ pub enum EventOps {
 /// 一次订阅及其环形事件队列（Linux `struct v4l2_subscribed_event`）。
 #[derive(Debug)]
 struct SubscribedEvent {
-    ty: u32,
+    ty: EventType,
     id: u32,
     ops: EventOps,
     elems: usize,
@@ -101,7 +101,7 @@ impl V4l2Fh {
         elems: usize,
         ops: EventOps,
     ) -> Result<()> {
-        if sub.ty == EventType::All as u32 {
+        if sub.ty == EventType::All {
             return Err(V4l2Error::InvalidArgument);
         }
         if self.is_subscribed(sub.ty, sub.id) {
@@ -123,7 +123,7 @@ impl V4l2Fh {
     /// 取消未订阅的 type+id 无副作用（幂等，对齐 Linux
     /// `v4l2_event_unsubscribe`）。
     pub fn unsubscribe(&mut self, sub: &EventSubscription) {
-        if sub.ty == EventType::All as u32 {
+        if sub.ty == EventType::All {
             self.unsubscribe_all();
             return;
         }
@@ -152,7 +152,7 @@ impl V4l2Fh {
         let Some(sev) = self
             .subscribed
             .iter_mut()
-            .find(|s| s.ty == ev.ty && s.id == ev.id)
+            .find(|s| s.ty as u32 == ev.ty && s.id == ev.id)
         else {
             return false;
         };
@@ -190,7 +190,7 @@ impl V4l2Fh {
     }
 
     /// 是否已订阅给定 type+id。
-    pub fn is_subscribed(&self, ty: u32, id: u32) -> bool {
+    pub fn is_subscribed(&self, ty: EventType, id: u32) -> bool {
         self.subscribed.iter().any(|s| s.ty == ty && s.id == id)
     }
 }

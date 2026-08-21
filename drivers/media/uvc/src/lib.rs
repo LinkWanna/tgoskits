@@ -29,6 +29,7 @@ use crate::stream::{ISO_BATCH, ISO_DEPTH, IsoBatchPipeline, IsoStreamHandle, Uvc
 // 导入描述符解析模块
 pub mod controls;
 pub mod descriptors;
+pub use controls::VideoStreamingControl;
 pub use descriptors::*;
 
 pub mod frame;
@@ -339,12 +340,7 @@ impl<H: UvcHandle> UvcDevice<H> {
             "[UVC] VC units: camera_terminal={:?} processing_unit={:?}",
             parsed.vc_units.camera_terminal_id, parsed.vc_units.processing_unit_id
         );
-        crate::controls::register_uvc_controls(
-            &mut device.ctrls,
-            &device.handle,
-            device.vc_iface_num,
-            &parsed.vc_units,
-        );
+        device.register_controls(&parsed.vc_units);
         info!("[UVC] registered {} controls", device.ctrls.len());
         // 控件值变化事件由框架统一生成（S_CTRL / S_EXT_CTRLS 应用后触发），
         // 经驱动共享事件队列由 glue 排空到 fh。
@@ -528,49 +524,6 @@ impl<H: UvcHandle> UvcDevice<H> {
             trace.err_packets.load(Ordering::Relaxed),
             trace.bytes_received.load(Ordering::Relaxed),
         );
-    }
-
-    /// 发送单元控制请求（SET_CUR）——UVC 单元控制通道（4.2.2 类特定请求）。
-    pub(crate) fn send_pu_control(
-        handle: &H,
-        vc_iface: u8,
-        unit_id: u8,
-        control_selector: u8,
-        data: &[u8],
-    ) -> Result<(), USBError> {
-        let setup = ControlSetup {
-            request_type: RequestType::Class,
-            recipient: Recipient::Interface,
-            request: RequestCode::SetCur.into(),
-            value: (control_selector as u16) << 8,
-            index: ((unit_id as u16) << 8) | vc_iface as u16,
-        };
-        handle
-            .control_out(setup, data)
-            .map_err(|e| anyhow!("Failed to send unit control: {e:?}"))?;
-        Ok(())
-    }
-
-    /// 读取单元控制请求（GET_CUR）——UVC 单元控制通道（4.2.2 类特定请求）。
-    pub(crate) fn get_pu_control(
-        handle: &H,
-        vc_iface: u8,
-        unit_id: u8,
-        control_selector: u8,
-        request: RequestCode,
-        data: &mut [u8],
-    ) -> Result<(), USBError> {
-        let setup = ControlSetup {
-            request_type: RequestType::Class,
-            recipient: Recipient::Interface,
-            request: request.into(),
-            value: (control_selector as u16) << 8,
-            index: ((unit_id as u16) << 8) | vc_iface as u16,
-        };
-        handle
-            .control_in(setup, data)
-            .map_err(|e| anyhow!("Failed to get unit control: {e:?}"))?;
-        Ok(())
     }
 
     /// 发送 VS 控制请求

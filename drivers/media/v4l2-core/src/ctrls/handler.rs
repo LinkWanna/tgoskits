@@ -80,8 +80,8 @@ impl CtrlHandler {
         }
     }
 
-    /// 注册一个完整配置的控件
-    pub fn new_ctrl(&mut self, cfg: CtrlConfig) -> Result<()> {
+    /// 注册一个完整配置的控件（crate 内低层入口；对外请用 `new_int`/`new_bool`/`new_menu` 等类型化接口）。
+    pub(crate) fn new_ctrl(&mut self, cfg: CtrlConfig) -> Result<()> {
         if cfg.id == 0 || cfg.name.is_empty() || cfg.id >= CID_PRIVATE_BASE {
             return Err(V4l2Error::OutOfRange);
         }
@@ -128,7 +128,7 @@ impl CtrlHandler {
         self.insert_sorted(ctrl)
     }
 
-    /// 注册一个整数控件。
+    /// 注册一个整数控件（硬件代理时 `ops.is_some()` 自动追加 `VOLATILE`）。
     #[allow(clippy::too_many_arguments)]
     pub fn new_int(
         &mut self,
@@ -140,6 +140,11 @@ impl CtrlHandler {
         default: i64,
         ops: Option<CtrlOps>,
     ) -> Result<()> {
+        let flags = if ops.is_some() {
+            CtrlFlags::VOLATILE
+        } else {
+            CtrlFlags::empty()
+        };
         self.new_ctrl(CtrlConfig {
             id,
             name,
@@ -148,13 +153,13 @@ impl CtrlHandler {
             maximum: max,
             step: step as u64,
             default_value: default,
-            flags: CtrlFlags::empty(),
+            flags,
             qmenu: None,
             ops,
         })
     }
 
-    /// 注册一个布尔控件。
+    /// 注册一个布尔控件（硬件代理时自动 `VOLATILE`）。
     pub fn new_bool(
         &mut self,
         id: u32,
@@ -162,6 +167,11 @@ impl CtrlHandler {
         default: bool,
         ops: Option<CtrlOps>,
     ) -> Result<()> {
+        let flags = if ops.is_some() {
+            CtrlFlags::VOLATILE
+        } else {
+            CtrlFlags::empty()
+        };
         self.new_ctrl(CtrlConfig {
             id,
             name,
@@ -170,7 +180,7 @@ impl CtrlHandler {
             maximum: 1,
             step: 1,
             default_value: default as i64,
-            flags: CtrlFlags::empty(),
+            flags,
             qmenu: None,
             ops,
         })
@@ -186,6 +196,11 @@ impl CtrlHandler {
         qmenu: &'static [&'static str],
         ops: Option<CtrlOps>,
     ) -> Result<()> {
+        let flags = if ops.is_some() {
+            CtrlFlags::VOLATILE
+        } else {
+            CtrlFlags::empty()
+        };
         self.new_ctrl(CtrlConfig {
             id,
             name,
@@ -194,8 +209,24 @@ impl CtrlHandler {
             maximum: items as i64 - 1,
             step: 0,
             default_value: default as i64,
-            flags: CtrlFlags::empty(),
+            flags,
             qmenu: Some(qmenu),
+            ops,
+        })
+    }
+
+    /// 注册一个按钮控件（`Button` 恒为 `WRITE_ONLY|EXECUTE_ON_WRITE`）。
+    pub fn new_button(&mut self, id: u32, name: &'static str, ops: Option<CtrlOps>) -> Result<()> {
+        self.new_ctrl(CtrlConfig {
+            id,
+            name,
+            ctrl_type: CtrlType::Button,
+            minimum: 0,
+            maximum: 0,
+            step: 0,
+            default_value: 0,
+            flags: CtrlFlags::empty(),
+            qmenu: None,
             ops,
         })
     }
@@ -524,7 +555,7 @@ impl CtrlHandler {
 
     /// 处理 `VIDIOC_SUBSCRIBE_EVENT` 的 `V4L2_EVENT_CTRL` 订阅。
     pub fn subscribe_event(&self, fh: &mut V4l2Fh, sub: &EventSubscription) -> Result<()> {
-        if sub.ty != EventType::Ctrl as u32 {
+        if sub.ty != EventType::Ctrl {
             return Err(V4l2Error::InvalidArgument);
         }
         let ctrl = self.find(sub.id).ok_or(V4l2Error::InvalidArgument)?;
@@ -1272,7 +1303,7 @@ mod tests {
 
     fn ctrl_sub(id: u32, flags: EventSubFlags) -> EventSubscription {
         EventSubscription {
-            ty: EventType::Ctrl as u32,
+            ty: EventType::Ctrl,
             id,
             flags,
             reserved: [0; 5],
@@ -1345,7 +1376,12 @@ mod tests {
         assert!(matches!(
             handler.subscribe_event(
                 &mut fh,
-                &ctrl_sub(EventType::Eos as u32, EventSubFlags::empty())
+                &EventSubscription {
+                    ty: EventType::Eos,
+                    id: BRIGHTNESS,
+                    flags: EventSubFlags::empty(),
+                    reserved: [0; 5],
+                }
             ),
             Err(V4l2Error::InvalidArgument)
         ));

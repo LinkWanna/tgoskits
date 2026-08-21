@@ -11,10 +11,10 @@ use v4l2_core::{
     self, IoctlOps, V4L2DriverOps,
     error::V4l2Error,
     interface::{
+        BufType, Field, Memory, Timeval,
         buffer::{BufFlags, Buffer, Requestbuffers},
         capability::{Capabilities, Capability},
         colorspace::Colorspace,
-        {BufType, Field, Memory, Timeval},
         format::{self, Fmtdesc, Format, FrameIntervalEnum, FrameSizeEnum},
         inout::{self, OutputType},
         stream::StreamParm,

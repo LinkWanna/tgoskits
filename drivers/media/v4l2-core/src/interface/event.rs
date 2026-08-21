@@ -11,7 +11,7 @@ use crate::interface::Timespec;
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct EventSubscription {
-    pub ty: u32,              // [in] 事件类型（例如 [`EventType::Ctrl`]）
+    pub ty: EventType,        // [in] 事件类型
     pub id: u32,              // [in] 关联 ID（例如 [`EventType::Ctrl`] 对应的控制 ID）
     pub flags: EventSubFlags, // [in] 事件订阅标志
     pub reserved: [u32; 5],
@@ -38,12 +38,12 @@ pub struct Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventType {
     All          = 0,
-    Vsync        = 1,
-    Eos          = 2,
-    Ctrl         = 3,
-    FrameSync    = 4,
-    SourceChange = 5,
-    MotionDet    = 6,
+    Vsync        = 1, // 垂直同步信号事件（Vertical Sync）
+    Eos          = 2, // 流结束事件（End Of Stream）
+    Ctrl         = 3, // 控件变化事件（Control Change）
+    FrameSync    = 4, // 帧同步事件（Frame Sync）
+    SourceChange = 5, // 信号源变化事件（Source Change）
+    MotionDet    = 6, // 运动检测事件（Motion Detection）
     PrivateStart = 0x0800_0000,
 }
 

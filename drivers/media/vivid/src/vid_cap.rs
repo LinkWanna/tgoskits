@@ -14,10 +14,10 @@ use v4l2_core::{
     error::V4l2Error,
     filehandler::V4l2Fh,
     interface::{
+        BufType, Field, Memory, Timeval,
         buffer::{BufFlags, Buffer, Requestbuffers},
         capability::{Capabilities, Capability},
         colorspace::{Colorspace, Quantization, XferFunc, YcbcrEncoding},
-        {BufType, Field, Memory, Timeval},
         crop::{Crop, Cropcap, Selection, SelectionTarget},
         event::{Event, EventSubscription},
         format::{
