@@ -5055,6 +5055,7 @@ name = "media-uvc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ax-runtime",
  "ax-sync",
  "ax-task",
  "axpoll",

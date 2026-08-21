@@ -10,6 +10,7 @@ v4l2-core = { workspace = true }
 videobuffer = { workspace = true }
 ax-sync = { workspace = true, features = ["sleep"] }
 ax-task = { workspace = true, features = ["multitask"] }
+ax-runtime = { workspace = true }
 axpoll = { workspace = true }
 log = { workspace = true }
 anyhow = { workspace = true }

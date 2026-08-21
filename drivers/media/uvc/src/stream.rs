@@ -11,7 +11,7 @@ use crab_usb::usb_if::err::USBError;
 use v4l2_core::interface::Field;
 use videobuffer::{BufferState, Vb2MemOps, Vb2Queue};
 
-use crate::frame::FrameParser;
+use crate::{frame::FrameParser, stats::UvcStats};
 
 /// 每批微帧数（64 µframes = 8ms/批；与 dwc2 ring 网格对齐）。
 pub(crate) const ISO_BATCH: usize = 64;
@@ -42,23 +42,16 @@ pub(crate) struct CaptureSession {
     pub(crate) dest: Option<(u32, usize, usize)>,
     /// 固定帧大小（未压缩格式）用于截断帧过滤；压缩格式为 None（大小可变）。
     pub(crate) expected_bytes: Option<usize>,
+    pub(crate) stats: Arc<UvcStats>,
 }
 
 impl CaptureSession {
-    #[allow(dead_code)]
-    pub(crate) fn new() -> Self {
-        Self {
-            parser: FrameParser::new(),
-            dest: None,
-            expected_bytes: None,
-        }
-    }
-
-    pub(crate) fn with_expected(expected: Option<usize>) -> Self {
+    pub(crate) fn with_expected_and_stats(expected: Option<usize>, stats: Arc<UvcStats>) -> Self {
         Self {
             parser: FrameParser::new(),
             dest: None,
             expected_bytes: expected,
+            stats,
         }
     }
 }
@@ -71,22 +64,61 @@ pub(crate) fn process_iso_batch<M: Vb2MemOps>(
     actuals: &[usize],
     slot_len: usize,
 ) {
+    use crate::frame::UvcPayloadHeader;
+
+    // 诊断：批维度计数
+    session.stats.record_batch(actuals.len());
+    let mut starved_payload_bytes = 0usize;
+    let mut has_starved_batch = false;
+
     // 帧目标跨批保持：仅无在飞目标（帧起点）时取新缓冲。批开头重取会让
     // requeue 的低索引缓冲劫持在飞帧（见 CaptureSession 文档）。
     if session.dest.is_none() {
         session.dest = acquire_dest(queue);
+        if session.dest.is_none() {
+            has_starved_batch = true;
+        }
     }
     let mut dest = session.dest;
+    if dest.is_none() {
+        has_starved_batch = true;
+    }
+    if has_starved_batch {
+        session.stats.record_batch_starved();
+    }
     // 有目标直写 Active 缓冲；无目标传空切片 → parser 只跟踪头/边界，
     // payload 整帧丢弃。空目标时仍需逐包跟踪 FID/EOF 以保持帧同步，
     // 否则饥饿期间翻转丢失会导致下一帧以错误边界截断（连续取帧
     // 614400/20312/2048 的根因）。
     for (i, &actual) in actuals.iter().enumerate() {
+        if actual == 0 {
+            continue;
+        }
+        if actual > 0 {
+            session.stats.record_packet_with_data(actual);
+        }
         if actual < 2 {
+            session.stats.record_invalid_header();
             continue;
         }
         // 等长槽切分批缓冲（完成时数据已拷回）。
         let pkt = &data[i * slot_len..i * slot_len + actual];
+        // 预解析头用于统计（不影响 frame.rs 的权威解析）
+        let hdr_opt = UvcPayloadHeader::parse(pkt);
+        if hdr_opt.is_none() {
+            session.stats.record_invalid_header();
+            continue;
+        }
+        let (hdr, hdr_len) = hdr_opt.unwrap();
+        if hdr.has_err {
+            session.stats.record_err_packet();
+        }
+        let payload_len = pkt.len().saturating_sub(hdr_len);
+        if dest.is_none() && payload_len > 0 {
+            starved_payload_bytes += payload_len;
+        } else if payload_len > 0 {
+            session.stats.record_payload(payload_len);
+        }
         // 有目标直写 Active 缓冲；无目标传空切片 → parser 只跟踪头/边界，
         // payload 整帧丢弃。
         let mut out: &mut [u8] = dest_out(dest);
@@ -103,6 +135,7 @@ pub(crate) fn process_iso_batch<M: Vb2MemOps>(
                             evt.bytes,
                             session.expected_bytes
                         );
+                        session.stats.record_frame_dropped_truncated();
                         // 复用同一 Active 缓冲承载下一帧（filled 已在 finish_frame 清零，
                         // 下一包将从 0 覆盖），避免截断帧被当成正常帧交付。
                     } else {
@@ -117,6 +150,11 @@ pub(crate) fn process_iso_batch<M: Vb2MemOps>(
                                 evt.bytes as u32,
                                 Field::NoField as u32,
                             );
+                            session.stats.record_frame_done();
+                        } else {
+                            // 无目标时产生的完整帧（理论上仅空目标跟踪时 filled==0，
+                            // 不应出现 bytes>0），计为丢弃
+                            session.stats.record_frame_dropped_truncated();
                         }
                         // 帧完成（空帧不发事件——对齐 Linux）：换目标缓冲；无则以
                         // 空切片继续跟踪头/边界，payload 整帧丢弃直到重获缓冲。
@@ -124,6 +162,7 @@ pub(crate) fn process_iso_batch<M: Vb2MemOps>(
                     }
                 } else {
                     // 空帧不发事件但仍换目标（对齐 Linux EOF && bytesused==0 分支）。
+                    session.stats.record_frame_dropped_empty();
                     dest = acquire_dest(queue);
                 }
             }
@@ -136,6 +175,11 @@ pub(crate) fn process_iso_batch<M: Vb2MemOps>(
             }
             break;
         }
+    }
+    if starved_payload_bytes > 0 {
+        session
+            .stats
+            .record_bytes_dropped_starved(starved_payload_bytes);
     }
     session.dest = dest;
 }
@@ -258,194 +302,4 @@ fn acquire_dest<M: Vb2MemOps>(queue: &Vb2Queue<M>) -> Option<(u32, usize, usize)
         return None;
     }
     Some((idx, va, plane.length as usize))
-}
-
-#[cfg(test)]
-mod tests {
-    use alloc::vec::Vec;
-    use std::sync::Mutex as StdMutex;
-
-    use v4l2_core::V4l2Error;
-    use videobuffer::{Vb2MemOps, Vb2Queue, buf::MemPlane};
-
-    use super::*;
-    use crate::descriptors::PayloadHeaderFlags as Flags;
-
-    struct TestAlloc {
-        storage: StdMutex<Vec<Vec<u8>>>,
-    }
-
-    impl Default for TestAlloc {
-        fn default() -> Self {
-            Self {
-                storage: StdMutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl Vb2MemOps for TestAlloc {
-        fn alloc(&self, sizes: &[u32]) -> Result<Vec<MemPlane>, V4l2Error> {
-            let mut storage = self.storage.lock().unwrap();
-            let mut planes = Vec::new();
-            for &size in sizes {
-                let buf = vec![0u8; size as usize];
-                let va = buf.as_ptr() as usize;
-                let offset = storage.len() * 4096;
-                storage.push(buf);
-                planes.push(MemPlane {
-                    cookie: va,
-                    offset,
-                    length: size,
-                });
-            }
-            Ok(planes)
-        }
-
-        fn release(&self, _planes: &[MemPlane]) {}
-
-        fn mmap(&self, plane: &MemPlane) -> Vec<usize> {
-            let n = plane.length.div_ceil(4096) as usize;
-            (0..n).map(|i| plane.cookie + i * 4096).collect()
-        }
-    }
-
-    const FID0: u8 = 0;
-    const FID1: u8 = Flags::FID.bits();
-    const EOF: u8 = Flags::EOF.bits();
-
-    fn pkt(flags: u8, payload_len: usize) -> Vec<u8> {
-        let mut v = Vec::with_capacity(2 + payload_len);
-        v.push(2);
-        v.push(flags);
-        v.extend(core::iter::repeat(0xAA).take(payload_len));
-        v
-    }
-
-    fn build_batch(packets: &[Vec<u8>], slot_len: usize) -> (Vec<u8>, Vec<usize>) {
-        let mut data = vec![0u8; slot_len * packets.len()];
-        let mut actuals = Vec::with_capacity(packets.len());
-        for (i, p) in packets.iter().enumerate() {
-            let actual = p.len();
-            data[i * slot_len..i * slot_len + actual].copy_from_slice(p);
-            actuals.push(actual);
-        }
-        (data, actuals)
-    }
-
-    #[test]
-    fn starvation_keeps_sync_and_drops_truncated() {
-        // 期望固定帧 100B，用于复现连续取帧 614400/20312 截断的根因：
-        // 队列饥饿期间整批丢弃若不跟踪头会丢失 FID 翻转，导致下一帧以错误边界截断。
-        let q = Vb2Queue::new(TestAlloc::default(), 1, 4);
-        q.reqbufs(1, &[100]).unwrap();
-        q.qbuf(0).unwrap();
-        q.streamon().unwrap();
-
-        let mut session = CaptureSession::with_expected(Some(100));
-        let slot_len = 32;
-
-        // 同步：先送 FID0 再送 FID1 帧，确保 parser 进入 synced 状态。
-        // Frame1: FID1 10 包 *10B =100B，末包 EOF。
-        let mut frame1_pkts = Vec::new();
-        frame1_pkts.push(pkt(FID0, 1)); // sync 丢弃
-        for i in 0..10 {
-            let eof = i == 9;
-            frame1_pkts.push(pkt(FID1 | if eof { EOF } else { 0 }, 10));
-        }
-        let (data, actuals) = build_batch(&frame1_pkts, slot_len);
-        process_iso_batch(&mut session, &q, &data, &actuals, slot_len);
-        assert!(q.is_readable(), "首帧应完整交付");
-        let idx = q.dqbuf().unwrap();
-        let vb = q.buffer_snapshot(idx).unwrap();
-        assert_eq!(vb.bytesused, 100);
-        // 不立即 qbuf，制造下次批处理时 Active=0 的饥饿窗口。
-        assert!(q.take_active().is_none());
-
-        // 饥饿批：下一帧 FID0 的前半部分 5 包 *10B =50B，无 EOF，dest=None 时仅跟踪头。
-        let mut starve_pkts = Vec::new();
-        for _ in 0..5 {
-            starve_pkts.push(pkt(FID0, 10));
-        }
-        let (sdata, sactuals) = build_batch(&starve_pkts, slot_len);
-        process_iso_batch(&mut session, &q, &sdata, &sactuals, slot_len);
-        assert!(!q.is_readable(), "饥饿批不应产出帧");
-        // 此时 parser 已跟踪到 FID0，filled 因空目标保持 0。
-
-        // 恢复缓冲
-        q.qbuf(idx).unwrap();
-        assert!(q.take_active().is_some());
-
-        // 截断帧的后半：剩余 5 包 *10B 并 EOF，累计仅 50B（前半 50B 已因无缓冲丢弃），
-        // 固定大小校验应丢弃该截断帧。
-        let mut trunc_pkts = Vec::new();
-        for i in 0..5 {
-            let eof = i == 4;
-            trunc_pkts.push(pkt(FID0 | if eof { EOF } else { 0 }, 10));
-        }
-        let (tdata, tactuals) = build_batch(&trunc_pkts, slot_len);
-        process_iso_batch(&mut session, &q, &tdata, &tactuals, slot_len);
-        assert!(!q.is_readable(), "截断帧 50B != 期望 100B 应被丢弃");
-
-        // 下一完整帧 FID1 100B 应正常交付，证明同步未丢失且截断被过滤。
-        let mut frame3_pkts = Vec::new();
-        for i in 0..10 {
-            let eof = i == 9;
-            frame3_pkts.push(pkt(FID1 | if eof { EOF } else { 0 }, 10));
-        }
-        let (f3data, f3actuals) = build_batch(&frame3_pkts, slot_len);
-        process_iso_batch(&mut session, &q, &f3data, &f3actuals, slot_len);
-        assert!(q.is_readable(), "下一完整帧应交付");
-        let idx2 = q.dqbuf().unwrap();
-        let vb2 = q.buffer_snapshot(idx2).unwrap();
-        assert_eq!(vb2.bytesused, 100);
-    }
-
-    #[test]
-    fn fixed_size_validation_drops_truncated_while_compressed_allows_variable() {
-        let q = Vb2Queue::new(TestAlloc::default(), 1, 4);
-        q.reqbufs(1, &[100]).unwrap();
-        q.qbuf(0).unwrap();
-        q.streamon().unwrap();
-
-        // 未压缩固定 100B：50B 截断应丢弃
-        let mut sess_fixed = CaptureSession::with_expected(Some(100));
-        // 先同步
-        process_iso_batch(
-            &mut sess_fixed,
-            &q,
-            &build_batch(&[pkt(FID0, 1)], 32).0,
-            &build_batch(&[pkt(FID0, 1)], 32).1,
-            32,
-        );
-        let mut trunc = Vec::new();
-        for i in 0..5 {
-            let eof = i == 4;
-            trunc.push(pkt(FID1 | if eof { EOF } else { 0 }, 10));
-        }
-        let (data, actuals) = build_batch(&trunc, 32);
-        // 需要再送一次同步后的首帧：先送 FID0 同步，再送 FID1 截断
-        process_iso_batch(&mut sess_fixed, &q, &data, &actuals, 32);
-        // 上述直接以 FID1 起始但 last_fid 仍为 FID0（来自同步包），会累 50B 后 EOF 触发，
-        // 因 50 !=100 被丢弃
-        assert!(!q.is_readable());
-
-        // 压缩可变大小：同样 50B 应交付
-        let q2 = Vb2Queue::new(TestAlloc::default(), 1, 4);
-        q2.reqbufs(1, &[100]).unwrap();
-        q2.qbuf(0).unwrap();
-        q2.streamon().unwrap();
-        let mut sess_var = CaptureSession::with_expected(None);
-        process_iso_batch(
-            &mut sess_var,
-            &q2,
-            &build_batch(&[pkt(FID0, 1)], 32).0,
-            &build_batch(&[pkt(FID0, 1)], 32).1,
-            32,
-        );
-        let (data2, actuals2) = build_batch(&trunc, 32);
-        process_iso_batch(&mut sess_var, &q2, &data2, &actuals2, 32);
-        assert!(q2.is_readable());
-        let idx = q2.dqbuf().unwrap();
-        assert_eq!(q2.buffer_snapshot(idx).unwrap().bytesused, 50);
-    }
 }

@@ -26,6 +26,7 @@ use videobuffer::{Vb2Queue, VirtualAllocator};
 
 use crate::{
     helper::{parse_stream_control, parse_uvc_device},
+    stats::UvcStats,
     stream::{ISO_BATCH, ISO_DEPTH, IsoBatchPipeline, IsoStreamHandle},
 };
 
@@ -36,6 +37,7 @@ pub use descriptors::*;
 
 pub mod frame;
 pub mod helper;
+pub mod stats;
 pub mod stream;
 pub mod v4l2;
 
@@ -282,6 +284,8 @@ pub struct UvcDevice<H: UvcHandle> {
     pub(crate) state: Mutex<UvcDeviceState>,
     need_payload: usize,
     stream: Mutex<Option<IsoStreamWorker>>,
+    /// 诊断统计：worker 侧无锁更新，close 时快照打印，对齐 dwc2/stats.rs。
+    pub(crate) stats: Arc<UvcStats>,
     /// V4L2 事件源：驱动投递事件（如控件变更），由 glue 排空到 fh。
     events: Arc<Mutex<Vec<v4l2_core::interface::event::Event>>>,
 }
@@ -320,6 +324,7 @@ impl<H: UvcHandle> UvcDevice<H> {
             queue: Arc::new(Vb2Queue::new(VirtualAllocator::new(), 2, 8)),
             need_payload: 0,
             stream: Mutex::new(None),
+            stats: Arc::new(UvcStats::new()),
             events: Arc::new(Mutex::new(Vec::new())),
         };
 
@@ -423,9 +428,11 @@ impl<H: UvcHandle> UvcDevice<H> {
         );
         let cancel = Arc::new(AtomicBool::new(false));
         let in_flight: Arc<Mutex<Vec<Arc<dyn IsoStreamHandle>>>> = Arc::new(Mutex::new(Vec::new()));
+        self.stats.reset();
         let worker = {
             let handle = self.handle.clone();
             let queue = self.queue.clone();
+            let stats = self.stats.clone();
             let endpoint = best.ep;
             let cancel = cancel.clone();
             let in_flight = in_flight.clone();
@@ -434,10 +441,14 @@ impl<H: UvcHandle> UvcDevice<H> {
                 .as_ref()
                 .filter(|fmt| !fmt.is_compressed())
                 .map(|fmt| fmt.frame_bytes());
-            let mut session = crate::stream::CaptureSession::with_expected(expected);
+            let mut session =
+                crate::stream::CaptureSession::with_expected_and_stats(expected, stats.clone());
             let mut pipeline = IsoBatchPipeline::new(slot_len, ISO_DEPTH);
             ax_task::spawn_with_name(
                 move || {
+                    // 提升等时 worker 优先级以降低 56ms 调度尾延迟，-10 在 CFS nice 范围内
+                    // 高于普通 capture 写文件任务，但低于中断上下文
+                    let _ = ax_task::set_priority(-10);
                     loop {
                         if cancel.load(Ordering::Acquire) {
                             break;
@@ -507,9 +518,15 @@ impl<H: UvcHandle> UvcDevice<H> {
                 let _ = pending.cancel();
             }
             worker.task.join();
+            info!("[UVC] stream stats: {}", self.stats.snapshot());
         }
         let _ = self.handle.claim_interface(self.vs_iface_num, 0);
         *self.state.lock() = UvcDeviceState::Configured;
+    }
+
+    /// 诊断统计快照（worker 侧无锁更新，STREAMON 时重置）。
+    pub fn stats_snapshot(&self) -> crate::stats::UvcStatsSnapshot {
+        self.stats.snapshot()
     }
 
     /// 发送 VS 控制请求
