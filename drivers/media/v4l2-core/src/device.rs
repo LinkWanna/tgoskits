@@ -11,7 +11,7 @@ use axpoll::{IoEvents, PollSet};
 
 use crate::{
     Result, V4l2Error,
-    ctrls::handler::CtrlHandler,
+    ctrls::CtrlHandler,
     driver::V4L2DriverOps,
     filehandler::V4l2Fh,
     interface::{

@@ -2,7 +2,7 @@ use core::sync::atomic::AtomicI64;
 
 use crate::{
     Result, V4l2Error,
-    ctrls::{Ctrl, CtrlConfig, CtrlOps, CtrlType, handler::CtrlHandler},
+    ctrls::{Ctrl, CtrlConfig, CtrlHandler, CtrlOps, CtrlType},
     interface::ctrl::{CID_PRIVATE_BASE, CtrlFlags},
 };
 

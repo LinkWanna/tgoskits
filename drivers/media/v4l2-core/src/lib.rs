@@ -12,7 +12,7 @@ pub mod filehandler;
 pub mod interface;
 pub mod ioctl;
 
-pub use ctrls::{CtrlOps, handler::CtrlHandler};
+pub use ctrls::{CtrlHandler, CtrlOps};
 pub use driver::V4L2DriverOps;
 pub use error::{Result, V4l2Error};
 pub use ioctl::{IoctlCmd, IoctlOps, LegacyIoctlCmd, LegacyIoctlOps, VideoIoctl};

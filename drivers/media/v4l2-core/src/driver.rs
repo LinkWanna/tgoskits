@@ -12,7 +12,7 @@ use alloc::{sync::Arc, vec::Vec};
 use axpoll::PollSet;
 
 use crate::{
-    ctrls::handler::CtrlHandler,
+    ctrls::CtrlHandler,
     ioctl::{IoctlOps, LegacyIoctlOps},
 };
 
