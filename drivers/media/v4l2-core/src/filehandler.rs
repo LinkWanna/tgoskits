@@ -26,47 +26,24 @@ pub enum EventOps {
     Ctrl,
 }
 
-/// 一次订阅及其环形事件队列（Linux `struct v4l2_subscribed_event`）。
-#[derive(Debug)]
-struct SubscribedEvent {
-    ty: EventType,
-    id: u32,
-    ops: EventOps,
-    elems: usize,
-    events: VecDeque<Event>,
+/// `SubscribedEvent::push` 的结果：是否新增了待处理槽位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushOutcome {
+    Inserted,
+    Merged,
 }
 
-impl SubscribedEvent {
-    /// 入队一个事件；队列满时在槽位内合并/替换（见 [`EventOps`]）。
-    /// 返回队列是否新增了槽位（false 表示合并/替换发生在已有槽位内）。
-    fn push(&mut self, ev: Event) -> bool {
-        if self.events.len() < self.elems {
-            self.events.push_back(ev);
-            return true;
-        }
-        let mut oldest = self.events.pop_front().expect("full queue is non-empty");
-        if self.elems == 1 && self.ops == EventOps::Ctrl {
-            // 单槽替换：用新事件刷新载荷（OR changes）与元数据。
-            ctrl_replace(&mut oldest, &ev);
-            oldest.ty = ev.ty;
-            oldest.id = ev.id;
-            oldest.sequence = ev.sequence;
-            oldest.timestamp = ev.timestamp;
-            self.events.push_back(oldest);
-        } else {
-            if self.elems > 1
-                && self.ops == EventOps::Ctrl
-                && let Some(newest) = self.events.back_mut()
-            {
-                ctrl_merge(&oldest, newest);
-            }
-            self.events.push_back(ev);
-        }
-        false
-    }
+/// `V4l2Fh::queue_event` 的投递结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueOutcome {
+    Delivered,
+    Merged,
+    NoSubscription,
 }
 
-/// V4L2 文件句柄——每次 open 的设备上下文。
+// ── 核心类型 ─────────────────────────────────────────────────────────
+
+/// V4L2 文件句柄——每次 open 的设备上下文.
 ///
 /// 保存每次 `open()` 的独立状态：事件订阅、待处理事件与序列号。
 /// 订阅与队列算法直接作为方法实现（对齐 Linux `v4l2-event.c`）。
@@ -92,10 +69,31 @@ impl V4l2Fh {
 
     /// 订阅一种事件类型。
     ///
-    /// `elems == 0` 时使用 [`EVENT_QUEUE_DEFAULT_ELEMS`]；重复订阅同一
-    /// type+id 是幂等的（返回 Ok 且不重复投递初始事件）。`type = ALL`
-    /// 与 `id` 无关，不能作为订阅类型，返回 [`V4l2Error::InvalidArgument`]。
-    pub fn subscribe(
+    /// `type = ALL` 与 `id` 无关，不能作为订阅类型，返回 `InvalidArgument`。
+    /// 重复订阅同一 `type+id` 是幂等的（返回 `Ok` 且不重复投递初始事件）。
+    pub fn subscribe(&mut self, sub: &EventSubscription) -> Result<()> {
+        if sub.ty == EventType::All {
+            return Err(V4l2Error::InvalidArgument);
+        }
+        if self.is_subscribed(sub.ty, sub.id) {
+            return Ok(());
+        }
+        let (elems, ops) = Self::subscription_params(sub.ty);
+        self.subscribed.push(SubscribedEvent {
+            ty: sub.ty,
+            id: sub.id,
+            ops,
+            elems,
+            events: VecDeque::with_capacity(elems),
+        });
+        Ok(())
+    }
+
+    /// 订阅一种事件类型（兼容旧 `elems/ops` 裸参路径）。
+    ///
+    /// 仅保留以兼容历史调用点；新代码应直接使用 [`Self::subscribe`]，
+    /// 其内部已按 `EventType` 推导 `elems/ops`。
+    pub fn subscribe_with_params(
         &mut self,
         sub: &EventSubscription,
         elems: usize,
@@ -120,7 +118,7 @@ impl V4l2Fh {
 
     /// 取消订阅；`type = ALL` 时取消全部订阅。
     ///
-    /// 取消未订阅的 type+id 无副作用（幂等，对齐 Linux
+    /// 取消未订阅的 `type+id` 无副作用（幂等，对齐 Linux
     /// `v4l2_event_unsubscribe`）。
     pub fn unsubscribe(&mut self, sub: &EventSubscription) {
         if sub.ty == EventType::All {
@@ -135,39 +133,46 @@ impl V4l2Fh {
             return;
         };
         let sev = self.subscribed.remove(pos);
-        self.pending_count -= sev.events.len();
+        self.pending_count = self.pending_count.saturating_sub(sev.events.len());
+        debug_assert_eq!(
+            self.pending_count,
+            self.subscribed.iter().map(|s| s.events.len()).sum()
+        );
     }
 
-    /// 取消全部订阅并清空待处理事件。
-    fn unsubscribe_all(&mut self) {
-        self.pending_count = 0;
-        self.subscribed.clear();
-    }
-
-    /// 投递一个事件：仅分发给精确匹配 type+id 的订阅，并分配 sequence。
+    /// 投递一个事件：仅分发给精确匹配 `type+id` 的订阅，并分配 `sequence`。
     ///
-    /// 返回是否投递成功（false = 没有匹配的订阅，事件被丢弃）。
-    /// 投递成功后由调用方唤醒 poll 的 `POLLPRI` 等待者。
-    pub fn queue_event(&mut self, mut ev: Event) -> bool {
-        let Some(sev) = self
+    /// 返回投递结果；`Delivered/Merged` 均表示已找到订阅（`Merged` 时
+    /// 队列内合并，不新增 `pending`），`NoSubscription` 表示无匹配而丢弃。
+    /// 投递成功后由调用方唤醒 `poll` 的 `POLLPRI` 等待者。
+    pub fn queue_event(&mut self, mut ev: Event) -> QueueOutcome {
+        let Some(idx) = self
             .subscribed
-            .iter_mut()
-            .find(|s| s.ty as u32 == ev.ty && s.id == ev.id)
+            .iter()
+            .position(|s| s.ty as u32 == ev.ty && s.id == ev.id)
         else {
-            return false;
+            return QueueOutcome::NoSubscription;
         };
-        // fh 级单调序列号：初始 0xFFFF_FFFF（-1），首个事件 sequence = 0。
-        self.sequence = self.sequence.wrapping_add(1);
-        ev.sequence = self.sequence;
-        // 队列满时在槽位内合并/替换，pending_count 不变；仅新增槽位时 +1。
-        self.pending_count += usize::from(sev.push(ev));
-        true
+        ev.sequence = self.alloc_sequence();
+        let sev = &mut self.subscribed[idx];
+        let outcome = sev.push(ev);
+        if outcome == PushOutcome::Inserted {
+            self.pending_count += 1;
+            QueueOutcome::Delivered
+        } else {
+            QueueOutcome::Merged
+        }
+    }
+
+    /// 兼容旧 `bool` 返回的投递接口（`true`=已找到订阅）。
+    pub fn queue_event_bool(&mut self, ev: Event) -> bool {
+        !matches!(self.queue_event(ev), QueueOutcome::NoSubscription)
     }
 
     /// 取出一条待处理事件（非阻塞；对齐 Linux 非阻塞 `v4l2_event_dequeue`）。
     ///
-    /// 跨订阅按 sequence 取最旧者，保持全局 FIFO（对齐 Linux available
-    /// 链表）。无待处理事件时返回 [`V4l2Error::NoEntry`]（ENOENT）。
+    /// 跨订阅按 `sequence` 取最旧者，保持全局 FIFO（对齐 Linux `available`
+    /// 链表）。无待处理事件时返回 `NoEntry`（`ENOENT`）。
     pub fn dequeue(&mut self) -> Result<Event> {
         let idx = self
             .subscribed
@@ -179,19 +184,43 @@ impl V4l2Fh {
             .ok_or(V4l2Error::NoEntry)?;
         let sev = &mut self.subscribed[idx];
         let mut ev = sev.events.pop_front().expect("front selected above");
-        self.pending_count -= 1;
+        self.pending_count = self.pending_count.saturating_sub(1);
         ev.pending = self.pending_count as u32;
+        debug_assert_eq!(
+            self.pending_count,
+            self.subscribed.iter().map(|s| s.events.len()).sum()
+        );
         Ok(ev)
     }
 
-    /// 当前待处理事件数（poll 路径判 `POLLPRI`）。
+    /// 当前待处理事件数（`poll` 路径判 `POLLPRI`）。
     pub fn pending(&self) -> usize {
         self.pending_count
     }
 
-    /// 是否已订阅给定 type+id。
+    /// 是否已订阅给定 `type+id`。
     pub fn is_subscribed(&self, ty: EventType, id: u32) -> bool {
         self.subscribed.iter().any(|s| s.ty == ty && s.id == id)
+    }
+
+    /// 分配下一个 `sequence`（`wrapping_add`，初始 `MAX`→`0`）。
+    fn alloc_sequence(&mut self) -> u32 {
+        self.sequence = self.sequence.wrapping_add(1);
+        self.sequence
+    }
+
+    /// 按 `EventType` 推导订阅参数（`elems/ops`）。
+    fn subscription_params(ty: EventType) -> (usize, EventOps) {
+        match ty {
+            EventType::Ctrl => (EVENT_QUEUE_DEFAULT_ELEMS, EventOps::Ctrl),
+            _ => (EVENT_QUEUE_DEFAULT_ELEMS, EventOps::DropOldest),
+        }
+    }
+
+    /// 取消全部订阅并清空待处理事件。
+    fn unsubscribe_all(&mut self) {
+        self.pending_count = 0;
+        self.subscribed.clear();
     }
 }
 
@@ -201,7 +230,50 @@ impl Default for V4l2Fh {
     }
 }
 
-// ── CTRL 事件载荷 ────────────────────────────────────────────
+// ── 订阅队列细节 ─────────────────────────────────────────────────────
+
+/// 一次订阅及其环形事件队列（Linux `struct v4l2_subscribed_event`）。
+#[derive(Debug)]
+struct SubscribedEvent {
+    ty: EventType,
+    id: u32,
+    ops: EventOps,
+    elems: usize,
+    events: VecDeque<Event>,
+}
+
+impl SubscribedEvent {
+    /// 入队一个事件；队列满时在槽位内合并/替换。
+    ///
+    /// 未满时 `push_back` 并返回 `Inserted`；满时按 `EventOps::Ctrl`
+    /// 的单槽替换/多槽合并策略处理，返回 `Merged`（`pending` 不新增）。
+    fn push(&mut self, ev: Event) -> PushOutcome {
+        if self.events.len() < self.elems {
+            self.events.push_back(ev);
+            return PushOutcome::Inserted;
+        }
+        let mut oldest = self.events.pop_front().expect("full queue is non-empty");
+        if self.elems == 1 && self.ops == EventOps::Ctrl {
+            ctrl_replace(&mut oldest, &ev);
+            oldest.ty = ev.ty;
+            oldest.id = ev.id;
+            oldest.sequence = ev.sequence;
+            oldest.timestamp = ev.timestamp;
+            self.events.push_back(oldest);
+        } else {
+            if self.elems > 1
+                && self.ops == EventOps::Ctrl
+                && let Some(newest) = self.events.back_mut()
+            {
+                ctrl_merge(&oldest, newest);
+            }
+            self.events.push_back(ev);
+        }
+        PushOutcome::Merged
+    }
+}
+
+// ── CTRL 事件载荷 ────────────────────────────────────────────────────
 
 /// `v4l2_ctrl_replace`：用新事件载荷替换 `old`，并把旧 `changes` 按或合并。
 fn ctrl_replace(old: &mut Event, new: &Event) {
@@ -231,7 +303,7 @@ pub struct CtrlEventParams {
     pub default_value: i64,
 }
 
-/// 构建一个 V4L2_EVENT_CTRL 事件（对齐 Linux `v4l2_ctrls-core.c::fill_event`）。
+/// 构建一个 `V4L2_EVENT_CTRL` 事件（对齐 Linux `v4l2_ctrls-core.c::fill_event`）。
 ///
 /// 供 [`crate::ctrls::CtrlHandler`] 在订阅初始事件与值变化时调用。
 pub fn build_ctrl_event(params: CtrlEventParams, changes: CtrlChange) -> Event {

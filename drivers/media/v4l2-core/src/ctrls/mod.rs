@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicI64, Ordering};
 
 use crate::{
     Result, V4l2Error,
-    filehandler::{CtrlEventParams, EventOps, V4l2Fh, build_ctrl_event},
+    filehandler::{CtrlEventParams, V4l2Fh, build_ctrl_event},
     interface::{
         ctrl::{
             CID_PRIVATE_BASE, CTRL_ID_MASK, CTRL_MAX_DIMS, CTRL_WHICH_DEF_VAL, CTRL_WHICH_MAX_VAL,
@@ -634,7 +634,7 @@ impl CtrlHandler {
         if fh.is_subscribed(sub.ty, sub.id) {
             return Ok(());
         }
-        fh.subscribe(sub, 0, EventOps::Ctrl)?;
+        fh.subscribe(sub)?;
         if sub.flags.contains(EventSubFlags::SEND_INITIAL) {
             let changes = if ctrl.flags.contains(CtrlFlags::WRITE_ONLY) {
                 CtrlChange::FLAGS

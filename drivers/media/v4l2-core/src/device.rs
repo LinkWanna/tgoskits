@@ -13,7 +13,7 @@ use crate::{
     Result, V4l2Error,
     ctrls::CtrlHandler,
     driver::V4L2DriverOps,
-    filehandler::V4l2Fh,
+    filehandler::{QueueOutcome, V4l2Fh},
     interface::{
         ctrl::{ExtControl, ExtControls},
         event::{Event, EventSubscription},
@@ -173,7 +173,7 @@ impl VideoDevice {
     /// `event_poll_rx`（IRQ 安全）。
     pub fn queue_event(&mut self, ev: &mut Event) {
         if let Some(fh) = &mut self.fh
-            && fh.queue_event(*ev)
+            && fh.queue_event(*ev) != QueueOutcome::NoSubscription
         {
             self.event_poll_rx.wake_from_irq(IoEvents::PRI);
         }
