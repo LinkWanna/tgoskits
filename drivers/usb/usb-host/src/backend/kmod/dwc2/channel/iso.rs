@@ -11,19 +11,22 @@ use usb_if::{
     transfer::Direction,
 };
 
-use crate::backend::kmod::{
-    Kernel,
-    dwc2::{
-        Dwc2EpType, Dwc2Pid, Dwc2TransferFault,
-        channel::{ChannelConfig, ChannelLease, HostChannelPool},
-        dma::{DmaDescriptor, DmaDescriptors, Dwc2DmaBuffer, Dwc2DmaBufferPool},
-        dma_addr32, endpoint_number, fault_to_transfer_error, hcchar, hcint_fault, hctsiz_ddma,
-        reg::{
-            DWC2_COMPLETION_DISCONNECTED, DWC2_DMA_ALIGN, Dwc2Registers, HCINT_AHBERR,
-            HCINT_BBLERR, HCINT_CHHLTD, HCINT_FRMOVRN, HCINT_XACTERR, HCINT_XFERCOMPL,
+use crate::backend::{
+    kmod::{
+        Kernel,
+        dwc2::{
+            Dwc2EpType, Dwc2Pid, Dwc2TransferFault,
+            channel::{ChannelConfig, ChannelLease, HostChannelPool},
+            dma::{DmaDescriptor, DmaDescriptors, Dwc2DmaBuffer, Dwc2DmaBufferPool},
+            dma_addr32, endpoint_number, fault_to_transfer_error, hcchar, hcint_fault, hctsiz_ddma,
+            reg::{
+                DWC2_COMPLETION_DISCONNECTED, DWC2_DMA_ALIGN, Dwc2Registers, HCINT_AHBERR,
+                HCINT_BBLERR, HCINT_CHHLTD, HCINT_FRMOVRN, HCINT_XACTERR, HCINT_XFERCOMPL,
+            },
+            stats::Dwc2Stats,
         },
-        stats::Dwc2Stats,
     },
+    ty::ep::IsoIrqCallback,
 };
 
 // ═══════════════════════════════════════════
@@ -228,10 +231,16 @@ pub(crate) struct IsoChannelState {
         core::result::Result<TransferCompletion, TransferError>,
     )>,
     fatal: Option<IsoHaltReason>,
+    irq_callback: Option<IsoIrqCallback>,
+    cached_interval: Option<u32>,
+    cached_speed: Option<Speed>,
 }
 
 impl Drop for IsoChannelState {
     fn drop(&mut self) {
+        if let Some(lease) = self.lease.as_ref() {
+            self.pool.completions.clear_irq_iso_state(lease.channel);
+        }
         if let Some(lease) = self.lease.as_ref()
             && lease.hardware_active.load(Ordering::Acquire)
         {
@@ -276,7 +285,32 @@ impl IsoChannelState {
             pending: VecDeque::new(),
             completed: VecDeque::new(),
             fatal: None,
+            irq_callback: None,
+            cached_interval: None,
+            cached_speed: None,
         }
+    }
+
+    pub(crate) fn set_irq_callback(
+        &mut self,
+        cb: Option<IsoIrqCallback>,
+    ) -> Result<(), TransferError> {
+        // 清除回调允许在任意状态（STREAMOFF 时需强制清回调以回退到任务路径）
+        if cb.is_none() {
+            self.irq_callback = None;
+            return Ok(());
+        }
+        // 设置回调：若有残留会话（前次 STREAMOFF 的 SetInterface 曾 STALL），
+        // 强制清掉以允许二次 STREAMON。按用户确认无兜底，此为一次性自愈。
+        if !self.pending.is_empty() || !self.completed.is_empty() {
+            self.settle_all_with(|| TransferError::Cancelled);
+        }
+        self.irq_callback = cb;
+        Ok(())
+    }
+
+    pub(crate) fn has_irq_callback(&self) -> bool {
+        self.irq_callback.is_some()
     }
 
     /// 在飞或已完成的请求 id（端点回收/配置切换前停稳用）。
@@ -344,11 +378,14 @@ impl IsoChannelState {
         if self.lease.is_some() {
             return Ok(false);
         }
+        let self_ptr = self as *mut Self as usize;
         let lease = self.pool.acquire(false)?;
         let ring = DmaDescriptors::new(&self.kernel, ring_size, DWC2_DMA_ALIGN).map_err(|err| {
             TransferError::Other(anyhow!("DWC2 ISO descriptor ring alloc failed: {err}"))
         })?;
         self.stats.record_dma_alloc();
+        let ch = lease.channel;
+        self.pool.completions.set_irq_iso_state(ch, self_ptr);
         self.lease = Some(lease);
         self.ring = Some(ring);
 
@@ -438,6 +475,7 @@ impl IsoChannelState {
         let Some(lease) = self.lease.take() else {
             return;
         };
+        self.pool.completions.clear_irq_iso_state(lease.channel);
         self.pool.periodic.clear_channel(lease.channel);
         self.pool.completions.mark_iso(lease.channel, false);
         // 通道已停（或从未使能/已断开），清空环描述符（A=0）后再释放，
@@ -448,6 +486,8 @@ impl IsoChannelState {
         self.schedule = None;
         self.td_last = 0;
         self.start_full_frame = 0;
+        self.cached_interval = None;
+        self.cached_speed = None;
         lease.release();
     }
 
@@ -508,6 +548,8 @@ impl IsoChannelState {
         // 4. 初始化常驻通道（仅首次 submit）：租借通道、分配描述符环、
         //    计算调度参数并编程通道寄存器；已有通道时直接复用。
         let first_time = self.ensure_channel(cfg, direction, interval_slots, speed, ring_size)?;
+        self.cached_interval = Some(interval_slots);
+        self.cached_speed = Some(speed);
 
         // 5. 计算插入索引：队尾请求仍未服务（其末包描述符 A 位仍置位，硬件
         //    取指至少一个 interval 之后）时紧跟环尾插入，流水线无缝衔接；
@@ -756,6 +798,148 @@ impl IsoChannelState {
         // 正常路径：结算本批已服务的请求（本次 XFERCOMPL 位 + A 位回读）。
         self.drain_serviced(hcint & HCINT_XFERCOMPL != 0);
     }
+
+    /// 在硬中断内结算并通过 `irq_callback` 完成拼帧，随后零分配重入环。
+    ///
+    /// 仅当 `irq_callback.is_some()` 时由 `event::handle_channel_interrupts`
+    /// 调用；与 `poll_channel` 互斥（无兜底，按用户确认）。
+    pub(crate) fn poll_channel_in_irq(&mut self, hcint: u32) {
+        if self.lease.is_none() {
+            return;
+        }
+        if hcint & DWC2_COMPLETION_DISCONNECTED != 0 {
+            self.settle_all_with(|| TransferError::Disconnected);
+            return;
+        }
+        if let Some(fault) = hcint_fault(hcint) {
+            self.stats.record_fault(fault);
+            // 硬中断内不做格式化 warn，仅计 stat（避免分配）。
+            if hcint & HCINT_CHHLTD != 0 {
+                self.settle_all_with(|| fault_to_transfer_error(fault, hcint));
+            } else {
+                self.fatal = Some(IsoHaltReason::Fault(fault, hcint));
+                let _ = self.halt_channel();
+            }
+            return;
+        }
+        if let Some(reason) = self.fatal {
+            if hcint & HCINT_CHHLTD == 0 {
+                return;
+            }
+            self.settle_all_with(move || reason.error());
+            return;
+        }
+        if hcint & HCINT_CHHLTD != 0 {
+            self.settle_all_with(|| {
+                TransferError::Other(anyhow!(
+                    "DWC2 ISO channel halted without completion hcint={hcint:#x}"
+                ))
+            });
+            return;
+        }
+        self.drain_serviced_in_irq(hcint & HCINT_XFERCOMPL != 0);
+    }
+
+    fn drain_serviced_in_irq(&mut self, bit_done: bool) {
+        // 与 drain_serviced 语义一致，但对每个已服务请求：
+        // settle → copy_in → irq_callback → 零分配 requeue
+        let Some(cb) = self.irq_callback.clone() else {
+            // 无回调则回退到普通 drain（不应发生，防御）
+            self.drain_serviced(bit_done);
+            return;
+        };
+        let Some(interval) = self.cached_interval else {
+            self.drain_serviced(bit_done);
+            return;
+        };
+        let Some(speed) = self.cached_speed else {
+            self.drain_serviced(bit_done);
+            return;
+        };
+        let ring_size = iso_ring_size(speed);
+        let mut done = bit_done;
+        while !self.pending.is_empty() {
+            if !(done || self.head_serviced()) {
+                break;
+            }
+            let mut head = self.pending.pop_front().expect("non-empty checked above");
+            // 结算：读 desc 剩余、清 A、copy_in 到请求 buffer
+            let _ = self.settle_request(&mut head);
+            // 构造回调参数：整槽数据 + 逐包 actual（栈数组避免堆分配）
+            // ISO 批最多 64 包（UVC），极端下 hs interval=1 达 255，取 256 兜底。
+            let mut actuals_buf = [0usize; 256];
+            let mut pkt_cnt = 0usize;
+            for (i, pkt) in head.packets.iter().enumerate() {
+                if i >= 256 {
+                    break;
+                }
+                actuals_buf[i] = pkt.actual;
+                pkt_cnt += 1;
+            }
+            let actuals = &actuals_buf[..pkt_cnt];
+            if let Some((ptr, len)) = head.transfer.request_buffer() {
+                // SAFETY: ptr 来自 UVC slot 的 Vec<u8>，在流生命周期内有效，
+                // settle 后数据已拷回，且该 slot 在 requeue 前不会被 UVC 任务触碰。
+                let data: &[u8] =
+                    unsafe { core::slice::from_raw_parts(ptr.as_ptr() as *const u8, len) };
+                // 硬中断内调用 UVC 拼帧（仅 SpinLock+copy，无分配）
+                cb(data, actuals);
+            }
+            // 立即零分配重入环（复用同一 DmaBuffer 与同一 request_buffer）
+            self.requeue_in_irq(head, interval, speed, ring_size);
+            done = false;
+        }
+    }
+
+    fn requeue_in_irq(
+        &mut self,
+        mut req: IsoActiveRequest,
+        interval_slots: u32,
+        speed: Speed,
+        ring_size: usize,
+    ) {
+        // 重新计算插入位置：与 prepare_request 第 5 步一致
+        let cur_full = iso_starting_frame(self.regs.frame_number(), speed);
+        let target = frame_to_desc_idx(speed, cur_full);
+        let insert = if self.pending_tail_active() {
+            self.td_last
+        } else {
+            advance_along_grid(self.td_last, target, interval_slots as usize, ring_size)
+        };
+        let ring = self.ring.as_ref().expect("ring must exist for requeue");
+        // 复用同一 DMA 物理基址，按新 insert 重写描述符
+        let base_paddr = match dma_addr32(req.transfer.dma_addr()) {
+            Ok(v) => v,
+            Err(_) => {
+                // 地址异常则丢弃该请求并计错误
+                self.dma_pool.reclaim(req.transfer);
+                return;
+            }
+        };
+        let mut offset = 0u32;
+        // 更新计划表的 desc_index 并编程
+        let pkt_cnt = req.packets.len();
+        for (i, plan) in req.packets.iter_mut().enumerate() {
+            let index = (insert + i * interval_slots as usize) % ring_size;
+            plan.desc_index = index;
+            plan.actual = 0;
+            plan.status = TransferStatus::Completed;
+            let paddr = base_paddr.wrapping_add(offset);
+            offset = offset.wrapping_add(plan.planned as u32);
+            let last = i + 1 == pkt_cnt;
+            ring.write_descs(
+                index,
+                core::slice::from_ref(&DmaDescriptor::new_iso(paddr, plan.planned as u32, last)),
+            );
+        }
+        // 为下一次 IN 复用准备缓存同步（若底层为_cached，需 clean）
+        req.transfer.prepare_for_reuse();
+        self.stats.record_stage();
+        self.td_last = (insert + req.packets.len() * interval_slots as usize) % ring_size;
+        // 赋予新 ID（保持原 ID 也可，但为避免混淆分配新 ID）
+        // 为零分配复用，保持原 ID 更利于跟踪，这里保持原 ID
+        self.pending.push_back(req);
+    }
 }
 
 // ═══════════════════════════════════════════
@@ -883,6 +1067,17 @@ impl IsoChannelState {
         } else {
             Err(TransferError::QueueFull)
         }
+    }
+
+    /// 调用方需在 `set_irq_callback(None)` 后通过 `reclaim` 等待 CHHLTD。
+    pub(crate) fn force_halt(&mut self) -> core::result::Result<(), TransferError> {
+        let Some(id) = self.in_flight_request_id() else {
+            return Ok(());
+        };
+        if self.completed.iter().any(|(cid, _)| *cid == id) {
+            return Ok(());
+        }
+        self.cancel(id)
     }
 }
 

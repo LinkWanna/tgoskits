@@ -142,6 +142,18 @@ impl UsbDeviceHandle {
     ) -> StarryResult<SubmittedTransfer> {
         self.lease.submit_endpoint_transfer(endpoint, request)
     }
+
+    pub(crate) fn lease_set_iso_irq_callback(
+        &self,
+        endpoint: u8,
+        cb: Option<crab_usb::IsoIrqCallback>,
+    ) -> StarryResult<()> {
+        self.lease.set_iso_irq_callback(endpoint, cb)
+    }
+
+    pub(crate) fn lease_halt_iso_stream(&self, endpoint: u8) -> StarryResult<()> {
+        self.lease.halt_iso_stream(endpoint)
+    }
 }
 
 pub(crate) fn usb_device_snapshots() -> Vec<UsbDeviceSnapshotInfo> {

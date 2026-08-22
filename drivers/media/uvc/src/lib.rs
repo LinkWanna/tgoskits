@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(dead_code)]
 #[cfg(test)]
 extern crate std;
 
@@ -11,6 +12,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use anyhow::anyhow;
 use ax_sync::Mutex;
 use crab_usb::{
+    IsoIrqCallback,
     err::USBError,
     usb_if::{
         host::ControlSetup,
@@ -27,7 +29,7 @@ use videobuffer::{Vb2Queue, VirtualAllocator};
 use crate::{
     helper::{parse_stream_control, parse_uvc_device},
     stats::UvcStats,
-    stream::{ISO_BATCH, ISO_DEPTH, IsoBatchPipeline, IsoStreamHandle},
+    stream::{ISO_BATCH, ISO_DEPTH, IsoStreamHandle},
 };
 
 // 导入描述符解析模块
@@ -65,6 +67,21 @@ pub trait UvcHandle: Send + Sync + 'static {
         data: &mut [u8],
         packet_lengths: &[usize],
     ) -> Result<Arc<dyn IsoStreamHandle>, USBError>;
+
+    /// 负责帧拼装与 `buffer_done`，之后 DWC2 零分配重编程同一 slot。
+    /// 仅 DWC2 后端支持，其他后端返回 `NotSupported`。
+    fn set_iso_irq_callback(
+        &self,
+        _endpoint: u8,
+        _cb: Option<IsoIrqCallback>,
+    ) -> Result<(), USBError> {
+        Err(USBError::NotSupported)
+    }
+
+    /// 做 `claim_interface(alt=0)`，避免控制传输与周期调度并发导致 STALL。
+    fn halt_iso_stream(&self, _endpoint: u8) -> Result<(), USBError> {
+        Err(USBError::NotSupported)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -272,6 +289,12 @@ pub(crate) struct IsoStreamWorker {
     in_flight: Arc<Mutex<Vec<Arc<dyn IsoStreamHandle>>>>,
 }
 
+struct IrqStream {
+    ctx: Arc<crate::stream::IrqCaptureContext<VirtualAllocator>>,
+    slots: Vec<Vec<u8>>,
+    endpoint: u8,
+}
+
 pub struct UvcDevice<H: UvcHandle> {
     handle: Arc<H>,
     vs_iface_num: u8,
@@ -284,6 +307,7 @@ pub struct UvcDevice<H: UvcHandle> {
     pub(crate) state: Mutex<UvcDeviceState>,
     need_payload: usize,
     stream: Mutex<Option<IsoStreamWorker>>,
+    irq_stream: Mutex<Option<IrqStream>>,
     /// 诊断统计：worker 侧无锁更新，close 时快照打印，对齐 dwc2/stats.rs。
     pub(crate) stats: Arc<UvcStats>,
     /// V4L2 事件源：驱动投递事件（如控件变更），由 glue 排空到 fh。
@@ -324,6 +348,7 @@ impl<H: UvcHandle> UvcDevice<H> {
             queue: Arc::new(Vb2Queue::new(VirtualAllocator::new(), 2, 8)),
             need_payload: 0,
             stream: Mutex::new(None),
+            irq_stream: Mutex::new(None),
             stats: Arc::new(UvcStats::new()),
             events: Arc::new(Mutex::new(Vec::new())),
         };
@@ -393,7 +418,6 @@ impl<H: UvcHandle> UvcDevice<H> {
         Ok(())
     }
 
-    /// 选择最优 alt setting + SET_INTERFACE + spawn 流 worker（任务侧轮询模型）。
     pub(crate) fn start_streaming(&mut self) -> Result<(), USBError> {
         let best = self.find_best_alt();
         log::info!(
@@ -404,112 +428,101 @@ impl<H: UvcHandle> UvcDevice<H> {
             best.packets_per_uframe,
             best.interval,
         );
-        self.handle
+        if let Err(e) = self
+            .handle
             .claim_interface(self.vs_iface_num, best.alt_setting)
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to claim interface {} alt {}: {:?}",
-                    self.vs_iface_num,
-                    best.alt_setting,
-                    e
-                )
-            })?;
+        {
+            error!(
+                "[UVC] claim_interface vs={} alt={} failed: {e:?}",
+                self.vs_iface_num, best.alt_setting
+            );
+            return Err(e);
+        }
 
-        // 流 worker：预填充 `ISO_DEPTH` 个等长槽批（dwc2 环容量内），
-        // 完成后结算并立即回填，形成持续在飞的流水线。
         let slot_len = best.buf_len();
         info!(
-            "[UVC] start_streaming: iso worker ep={:#x} batch={} slot_len={} depth={} buf={}",
+            "[UVC] start_streaming(irq): ep={:#x} batch={} slot_len={} depth={} buf={}",
             best.ep,
             ISO_BATCH,
             slot_len,
             ISO_DEPTH,
             slot_len * ISO_BATCH * ISO_DEPTH
         );
-        let cancel = Arc::new(AtomicBool::new(false));
-        let in_flight: Arc<Mutex<Vec<Arc<dyn IsoStreamHandle>>>> = Arc::new(Mutex::new(Vec::new()));
         self.stats.reset();
-        let worker = {
-            let handle = self.handle.clone();
-            let queue = self.queue.clone();
-            let stats = self.stats.clone();
-            let endpoint = best.ep;
-            let cancel = cancel.clone();
-            let in_flight = in_flight.clone();
-            let expected = self
-                .current_format
-                .as_ref()
-                .filter(|fmt| !fmt.is_compressed())
-                .map(|fmt| fmt.frame_bytes());
-            let mut session =
-                crate::stream::CaptureSession::with_expected_and_stats(expected, stats.clone());
-            let mut pipeline = IsoBatchPipeline::new(slot_len, ISO_DEPTH);
-            ax_task::spawn_with_name(
-                move || {
-                    // 提升等时 worker 优先级以降低 56ms 调度尾延迟，-10 在 CFS nice 范围内
-                    // 高于普通 capture 写文件任务，但低于中断上下文
-                    let _ = ax_task::set_priority(-10);
-                    loop {
-                        if cancel.load(Ordering::Acquire) {
-                            break;
-                        }
-                        if let Err(err) = pipeline.submit_pending(&*handle, endpoint) {
-                            error!("[UVC] stream: submit_iso_batch err={err:?}");
-                            let _ = pipeline.cancel_all();
-                            queue.set_error();
-                            break;
-                        }
-                        *in_flight.lock() = pipeline.in_flight_handles();
-                        if cancel.load(Ordering::Acquire) {
-                            let _ = pipeline.cancel_all();
-                            *in_flight.lock() = Vec::new();
-                            break;
-                        }
-                        if pipeline.in_flight() == 0 {
-                            error!("[UVC] stream: iso pipeline has no in-flight batch");
-                            queue.set_error();
-                            break;
-                        }
-                        let outcome = ax_task::future::block_on(core::future::poll_fn(|cx| {
-                            pipeline.poll_process(cx, &mut session, &queue)
-                        }));
-                        *in_flight.lock() = Vec::new();
-                        if let Err(err) = outcome {
-                            let _ = pipeline.cancel_all();
-                            if cancel.load(Ordering::Acquire)
-                                || matches!(
-                                    err,
-                                    USBError::TransferError(
-                                        crab_usb::usb_if::err::TransferError::Cancelled
-                                    )
-                                )
-                            {
-                                break;
-                            }
-                            error!("[UVC] stream: iso batch failed err={err:?}");
-                            queue.set_error();
-                            break;
-                        }
-                    }
-                },
-                alloc::string::String::from("uvc-stream"),
-            )
-        };
-        *self.stream.lock() = Some(IsoStreamWorker {
-            task: worker,
-            cancel,
-            in_flight,
+        let expected = self
+            .current_format
+            .as_ref()
+            .filter(|fmt| !fmt.is_compressed())
+            .map(|fmt| fmt.frame_bytes());
+        let ctx = Arc::new(crate::stream::IrqCaptureContext::new(
+            self.queue.clone(),
+            expected,
+            self.stats.clone(),
+            slot_len,
+        ));
+        // 注册硬中断回调（需在首轮 submit 前完成，否则首批完成可能走任务路径）
+        let cb_ctx = ctx.clone();
+        let cb: IsoIrqCallback = Arc::new(move |data: &[u8], actuals: &[usize]| {
+            cb_ctx.handle_irq_batch(data, actuals, cb_ctx.slot_len);
         });
-        info!("[UVC] start_streaming: iso worker armed");
+        if let Err(e) = self.handle.set_iso_irq_callback(best.ep, Some(cb)) {
+            // 若后端不支持（非 DWC2），回退为错误，调用方可感知
+            error!(
+                "[UVC] set_iso_irq_callback failed ep={:#x} err={e:?} — abort streaming",
+                best.ep
+            );
+            let _ = self.handle.claim_interface(self.vs_iface_num, 0);
+            return Err(e);
+        }
+        let mut slots: Vec<Vec<u8>> = (0..ISO_DEPTH)
+            .map(|_| vec![0u8; slot_len * ISO_BATCH])
+            .collect();
+        let lengths = vec![slot_len; ISO_BATCH];
+        // 预填流水线：ISO_DEPTH 个等长槽批（环容量内），后续由硬中断零分配重入环
+        for slot in slots.iter_mut() {
+            match self
+                .handle
+                .submit_iso_batch(best.ep, &mut slot[..], &lengths)
+            {
+                Ok(_) => {}
+                Err(USBError::SlotLimitReached) => break,
+                Err(err) => {
+                    error!("[UVC] irq submit failed err={err:?}");
+                    let _ = self.handle.set_iso_irq_callback(best.ep, None);
+                    let _ = self.handle.claim_interface(self.vs_iface_num, 0);
+                    return Err(err);
+                }
+            }
+        }
+        if slots.is_empty() {
+            error!("[UVC] irq stream: no slot submitted");
+            let _ = self.handle.set_iso_irq_callback(best.ep, None);
+            let _ = self.handle.claim_interface(self.vs_iface_num, 0);
+            return Err(USBError::Other(anyhow!("no iso slot submitted")));
+        }
+        *self.irq_stream.lock() = Some(IrqStream {
+            ctx,
+            slots,
+            endpoint: best.ep,
+        });
+        info!(
+            "[UVC] start_streaming(irq): armed ep={:#x} depth={}",
+            best.ep, ISO_DEPTH
+        );
         *self.state.lock() = UvcDeviceState::Streaming;
         Ok(())
     }
 
-    /// 停采集（取消 + join 流 worker）→ SET_INTERFACE(alt=0)。
-    ///
-    /// 调用者必须随后执行 `queue.streamoff()`——它清队列状态并唤醒全部
-    /// 等待者（阻塞 DQBUF / poll），是停流路径的唤醒权威。
     pub(crate) fn close_stream(&self) {
+        if let Some(irq) = self.irq_stream.lock().take() {
+            let _ = self.handle.set_iso_irq_callback(irq.endpoint, None);
+            let _ = self.handle.halt_iso_stream(irq.endpoint);
+            let _ = self.handle.claim_interface(self.vs_iface_num, 0);
+            drop(irq);
+            info!("[UVC] irq stream stats: {}", self.stats.snapshot());
+            *self.state.lock() = UvcDeviceState::Configured;
+            return;
+        }
         if let Some(worker) = self.stream.lock().take() {
             // 置取消标志 + cancel 全部在飞批（halt 通道 → CHHLTD 唤醒 worker）。
             worker.cancel.store(true, Ordering::Release);

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! UVC 视频流 — 基于 ISO 批请求的帧采集（流水线模型）。
 //!
 //! STREAMON 时 spawn 流 worker：`IsoBatchPipeline` 预填充 `ISO_DEPTH` 个
@@ -7,6 +8,7 @@
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::task::{Context, Poll};
 
+use ax_sync::SpinLock;
 use crab_usb::usb_if::err::USBError;
 use v4l2_core::interface::Field;
 use videobuffer::{BufferState, Vb2MemOps, Vb2Queue};
@@ -54,6 +56,142 @@ impl CaptureSession {
             stats,
         }
     }
+}
+
+/// `queue` 与 `session` 均为 `SpinLock` 保护的 IRQ 安全结构。
+/// `handle_irq_batch` 在 DWC2 硬中断直接调用，完成拼帧与 `buffer_done`，
+/// 之后同一 `slot` 由 DWC2 零分配重入环，无需任务调度。
+pub(crate) struct IrqCaptureContext<M: Vb2MemOps> {
+    pub(crate) queue: Arc<Vb2Queue<M>>,
+    pub(crate) session: SpinLock<CaptureSession>,
+    pub(crate) slot_len: usize,
+}
+
+impl<M: Vb2MemOps> IrqCaptureContext<M> {
+    pub(crate) fn new(
+        queue: Arc<Vb2Queue<M>>,
+        expected: Option<usize>,
+        stats: Arc<UvcStats>,
+        slot_len: usize,
+    ) -> Self {
+        Self {
+            queue,
+            session: SpinLock::new(CaptureSession::with_expected_and_stats(expected, stats)),
+            slot_len,
+        }
+    }
+
+    /// 硬中断上下文拼帧：无分配、无可睡锁、无格式化。
+    ///
+    /// # Safety
+    /// 仅在 DWC2 硬中断且持有必要 `SpinLockIrqSave` 期间调用。
+    pub(crate) fn handle_irq_batch(&self, data: &[u8], actuals: &[usize], slot_len: usize) {
+        // 复用 process_iso_batch 核心循环，但通过 SpinLock 获取 session，
+        // 且截断帧警告仅计 stats 不分配。
+        let mut session = self.session.lock_irqsave();
+        process_iso_batch_irq(&mut session, &self.queue, data, actuals, slot_len);
+    }
+}
+
+/// 硬中断版拼帧（`process_iso_batch` 的零分配变体）
+///
+/// 与任务版语义一致，但 `log::warn!` 格式化分配被省略，仅计 `truncated` 统计，
+/// 确保硬中断无分配。
+fn process_iso_batch_irq<M: Vb2MemOps>(
+    session: &mut CaptureSession,
+    queue: &Vb2Queue<M>,
+    data: &[u8],
+    actuals: &[usize],
+    slot_len: usize,
+) {
+    use crate::frame::UvcPayloadHeader;
+
+    session.stats.record_batch(actuals.len());
+    let mut starved_payload_bytes = 0usize;
+    let mut has_starved_batch = false;
+
+    if session.dest.is_none() {
+        session.dest = acquire_dest(queue);
+        if session.dest.is_none() {
+            has_starved_batch = true;
+        }
+    }
+    let mut dest = session.dest;
+    if dest.is_none() {
+        has_starved_batch = true;
+    }
+    if has_starved_batch {
+        session.stats.record_batch_starved();
+    }
+    for (i, &actual) in actuals.iter().enumerate() {
+        if actual == 0 {
+            continue;
+        }
+        if actual > 0 {
+            session.stats.record_packet_with_data(actual);
+        }
+        if actual < 2 {
+            session.stats.record_invalid_header();
+            continue;
+        }
+        let pkt = &data[i * slot_len..i * slot_len + actual];
+        let hdr_opt = UvcPayloadHeader::parse(pkt);
+        if hdr_opt.is_none() {
+            session.stats.record_invalid_header();
+            continue;
+        }
+        let (hdr, hdr_len) = hdr_opt.unwrap();
+        if hdr.has_err {
+            session.stats.record_err_packet();
+        }
+        let payload_len = pkt.len().saturating_sub(hdr_len);
+        if dest.is_none() && payload_len > 0 {
+            starved_payload_bytes += payload_len;
+        } else if payload_len > 0 {
+            session.stats.record_payload(payload_len);
+        }
+        let mut out: &mut [u8] = dest_out(dest);
+        let mut result = session.parser.push_packet(pkt, out);
+        loop {
+            if let Some(evt) = result.evt {
+                if evt.bytes > 0 {
+                    let valid = session.expected_bytes.is_none_or(|exp| evt.bytes == exp);
+                    if !valid {
+                        // 硬中断内不做格式化 warn，仅计统计。
+                        session.stats.record_frame_dropped_truncated();
+                    } else {
+                        if let Some((idx, ..)) = dest.take() {
+                            let _ = queue.buffer_done(
+                                idx,
+                                BufferState::Done,
+                                evt.bytes as u32,
+                                Field::NoField as u32,
+                            );
+                            session.stats.record_frame_done();
+                        } else {
+                            session.stats.record_frame_dropped_truncated();
+                        }
+                        dest = acquire_dest(queue);
+                    }
+                } else {
+                    session.stats.record_frame_dropped_empty();
+                    dest = acquire_dest(queue);
+                }
+            }
+            if result.retry {
+                out = dest_out(dest);
+                result = session.parser.push_packet(pkt, out);
+                continue;
+            }
+            break;
+        }
+    }
+    if starved_payload_bytes > 0 {
+        session
+            .stats
+            .record_bytes_dropped_starved(starved_payload_bytes);
+    }
+    session.dest = dest;
 }
 
 /// 拼帧一批完成的 ISO 数据（任务上下文——流 worker 每批调用一次）。

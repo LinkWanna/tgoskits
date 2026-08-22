@@ -326,6 +326,17 @@ impl Dwc2DmaBuffer {
         self.len
     }
 
+    pub(crate) fn request_buffer(&self) -> Option<(NonNull<u8>, usize)> {
+        self.request_buffer
+    }
+
+    pub(crate) fn prepare_for_reuse(&self) {
+        if let Some(coherent) = &self.coherent {
+            coherent.sync_for_device(0, self.len);
+            // `mbarrier::mb()` 由调用方的 `write_descs` 内完成
+        }
+    }
+
     pub(crate) fn dma_addr(&self) -> u64 {
         self.coherent
             .as_ref()

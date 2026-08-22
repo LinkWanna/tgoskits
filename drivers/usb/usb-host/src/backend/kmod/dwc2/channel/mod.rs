@@ -3,7 +3,7 @@ pub mod non_iso;
 
 use alloc::{sync::Arc, vec::Vec};
 use core::{
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     task::Context,
 };
 
@@ -66,7 +66,7 @@ impl Dwc2PeriodicSchedule {
 
     /// 首次 ISO 通道激活时使能周期调度并装载帧列表（幂等）。
     pub(crate) fn ensure_enabled(&self, regs: Dwc2Registers) {
-        let _guard = self.inner.gate.lock();
+        let _guard = self.inner.gate.lock_irqsave();
         if self.inner.enabled.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -83,7 +83,7 @@ impl Dwc2PeriodicSchedule {
 
     /// 在帧位图中置位通道的每个服务帧。
     pub(crate) fn set_channel(&self, channel: u8, frames: &[usize]) {
-        let _guard = self.inner.gate.lock();
+        let _guard = self.inner.gate.lock_irqsave();
         let ptr = self.inner.data.as_ptr().as_ptr() as *mut u32;
         for &frame in frames {
             let index = frame & 63;
@@ -96,7 +96,7 @@ impl Dwc2PeriodicSchedule {
 
     /// 清掉通道在帧位图中的所有位（释放通道时调用）。
     pub(crate) fn clear_channel(&self, channel: u8) {
-        let _guard = self.inner.gate.lock();
+        let _guard = self.inner.gate.lock_irqsave();
         let ptr = self.inner.data.as_ptr().as_ptr() as *mut u32;
         for index in 0..64 {
             let value = unsafe { ptr.add(index).read_volatile() };
@@ -176,6 +176,7 @@ pub(crate) struct Dwc2ChannelCompletions {
     slots: Arc<Vec<Dwc2ChannelCompletionSlot>>,
     connected: Arc<AtomicBool>,
     lifecycle_gate: Arc<Mutex<()>>,
+    irq_iso_state: Arc<Vec<AtomicUsize>>,
 }
 
 impl Dwc2ChannelCompletions {
@@ -188,6 +189,11 @@ impl Dwc2ChannelCompletions {
             ),
             connected: Arc::new(AtomicBool::new(true)),
             lifecycle_gate: Arc::new(Mutex::new(())),
+            irq_iso_state: Arc::new(
+                (0..usize::from(DWC2_MAX_CHANNELS))
+                    .map(|_| AtomicUsize::new(0))
+                    .collect(),
+            ),
         }
     }
 
@@ -268,6 +274,18 @@ impl Dwc2ChannelCompletions {
             return Err(TransferError::Disconnected);
         }
         operation()
+    }
+
+    pub(crate) fn set_irq_iso_state(&self, channel: u8, ptr: usize) {
+        self.irq_iso_state[usize::from(channel)].store(ptr, Ordering::Release);
+    }
+
+    pub(crate) fn get_irq_iso_state(&self, channel: u8) -> usize {
+        self.irq_iso_state[usize::from(channel)].load(Ordering::Acquire)
+    }
+
+    pub(crate) fn clear_irq_iso_state(&self, channel: u8) {
+        self.irq_iso_state[usize::from(channel)].store(0, Ordering::Release);
     }
 }
 

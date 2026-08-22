@@ -17,7 +17,7 @@ pub mod buf;
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 
 pub use allocator::{Vb2MemOps, VirtualAllocator};
-use ax_sync::Mutex;
+use ax_sync::SpinLock;
 use axpoll::{IoEvents, PollSet};
 pub use buf::{BufferState, MemPlane, VIDEO_MAX_PLANES, Vb2Buffer};
 use v4l2_core::{V4l2Error, interface::buffer::BufFlags};
@@ -61,8 +61,11 @@ impl QueueInner {
 }
 
 /// V4L2 buffer 队列——vb2 状态机。
+///
+/// `take_active`/`buffer_snapshot` 可在 DWC2 硬中断直接调用，避免 UVC 丢帧。
+/// `reqbufs` 等可睡路径在持锁窗口内不分配，避免关中断睡眠。
 pub struct Vb2Queue<M: Vb2MemOps> {
-    inner: Mutex<QueueInner>,
+    inner: SpinLock<QueueInner>,
     alloc: M,
     /// 完成事件唤醒源（对齐 Linux vb2 `done_wq`）：`buffer_done`/`set_error`
     /// 在状态发布后唤醒，DQBUF 阻塞等待与 VFS poll 共用。
@@ -76,7 +79,7 @@ pub struct Vb2Queue<M: Vb2MemOps> {
 impl<M: Vb2MemOps> Vb2Queue<M> {
     pub fn new(alloc: M, min_buffers: u32, max_buffers: u32) -> Self {
         Self {
-            inner: Mutex::new(QueueInner {
+            inner: SpinLock::new(QueueInner {
                 buffers: Vec::new(),
                 queued_list: VecDeque::new(),
                 done_list: VecDeque::new(),
@@ -95,8 +98,8 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
 
     // ── 驱动侧（采集回调）──────────────────────────────────────────
 
-    /// 将 buffer 标记为 done/error。由采集侧（任务上下文，如流
-    /// worker）调用。
+    /// 将 buffer 标记为 done/error。由采集侧（任务或硬中断，如 DWC2
+    /// UVC IRQ 回调）调用。
     ///
     /// 若 `index` 越界、buffer 当前不是
     /// `Active`，或 `state` 不是 `Done`/`Error`——驱动
@@ -108,7 +111,7 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
         bytesused: u32,
         field: u32,
     ) -> Result<(), V4l2Error> {
-        let mut guard = self.inner.lock();
+        let mut guard = self.inner.lock_irqsave();
         let inner = &mut *guard;
         let vb = inner
             .buffers
@@ -156,28 +159,40 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
     /// （`MemPlane::offset` 是 UAPI 偏移、`[`Vb2MemOps::mmap`] 提供
     /// 逐页映射）——队列只做 offset → buffer/plane 匹配与页切片。
     pub fn mmap(&self, offset: u64, length: u64) -> Option<(Vec<usize>, usize)> {
-        let inner = self.inner.lock();
-        for vb in inner.buffers.iter() {
-            let plane = vb.planes.first()?;
-            let base = plane.offset as u64;
-            let end = base + plane.length as u64;
-            if offset >= base && offset < end {
-                if offset + length > end {
-                    return None;
+        // 先在 irqsave 锁内定位 plane，拷贝所需元数据后即释放锁，
+        // 再调用 alloc.mmap（可能持可睡锁），避免关中断睡眠。
+        let (cookie, plane_len, offset_in_plane) = {
+            let inner = self.inner.lock_irqsave();
+            let mut found = None;
+            for vb in inner.buffers.iter() {
+                let plane = vb.planes.first()?;
+                let base = plane.offset as u64;
+                let end = base + plane.length as u64;
+                if offset >= base && offset < end {
+                    if offset + length > end {
+                        break;
+                    }
+                    let sub = (offset - base) as usize;
+                    found = Some((plane.cookie, plane.length, sub));
+                    break;
                 }
-                let sub = (offset - base) as usize;
-                let page = 4096usize;
-                let first_page = sub / page;
-                let n_pages = (sub % page + length as usize).div_ceil(page);
-                let all = self.alloc.mmap(plane);
-                let addrs = all
-                    .get(first_page..first_page + n_pages)
-                    .unwrap_or_default()
-                    .to_vec();
-                return Some((addrs, length as usize));
             }
-        }
-        None
+            found?
+        };
+        let tmp_plane = MemPlane {
+            cookie,
+            offset: 0,
+            length: plane_len,
+        };
+        let page = 4096usize;
+        let first_page = offset_in_plane / page;
+        let n_pages = (offset_in_plane % page + length as usize).div_ceil(page);
+        let all = self.alloc.mmap(&tmp_plane);
+        let addrs = all
+            .get(first_page..first_page + n_pages)
+            .unwrap_or_default()
+            .to_vec();
+        Some((addrs, length as usize))
     }
     // ── poll 支撑 ──────────────────────────────────────────────────
 
@@ -189,22 +204,22 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
 
     /// done_list 是否有完成的帧可 dqbuf（poll 路径：POLLIN 就绪检查）。
     pub fn is_readable(&self) -> bool {
-        !self.inner.lock().done_list.is_empty()
+        !self.inner.lock_irqsave().done_list.is_empty()
     }
 
     pub fn is_error(&self) -> bool {
-        self.inner.lock().error
+        self.inner.lock_irqsave().error
     }
 
     /// 流是否处于 STREAMON 状态（DQBUF 阻塞等待条件之一：停流后
     /// 返回 EINVAL 而非继续等待——对齐 Linux `!q->streaming → -EINVAL`）。
     pub fn is_streaming(&self) -> bool {
-        self.inner.lock().streaming
+        self.inner.lock_irqsave().streaming
     }
 
-    /// 置队列错误并唤醒等待者（任务上下文安全）。
+    /// 置队列错误并唤醒等待者（任务或硬中断安全）。
     pub fn set_error(&self) {
-        self.inner.lock().error = true;
+        self.inner.lock_irqsave().error = true;
         self.poll_rx.wake_from_irq(IoEvents::ERR);
     }
     // ── 查询 ───────────────────────────────────────────────────────
@@ -214,7 +229,7 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
     /// 遍历所有 Active，不走此单取 API。
     pub fn take_active(&self) -> Option<u32> {
         self.inner
-            .lock()
+            .lock_irqsave()
             .buffers
             .iter()
             .position(|b| b.state == BufferState::Active)
@@ -224,7 +239,7 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
     /// 已 qbuf 未 dqbuf 的缓冲数（Queued + Active——qbuf 后不摘除直到
     /// dqbuf；含驱动拼帧中的。对齐 Linux `vb2_queue::queued_count`）。
     pub fn queued_count(&self) -> u32 {
-        self.inner.lock().queued_list.len() as u32
+        self.inner.lock_irqsave().queued_list.len() as u32
     }
     // ── 内存访问 ───────────────────────────────────────────────────
 }
@@ -234,19 +249,23 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
     // ── 分配 ──────────────────────────────────────────────────
 
     pub fn reqbufs(&self, count: u32, plane_sizes: &[u32]) -> Result<(), V4l2Error> {
-        let mut inner = self.inner.lock();
-        if inner.streaming {
-            return Err(V4l2Error::Busy);
+        // 先在 irqsave 锁内检查 streaming 并摘除旧 buffers，释放与分配在锁外
+        // 进行，避免关中断睡眠（alloc 需睡锁页回收）。
+        let old_planes: Vec<Vec<MemPlane>> = {
+            let mut inner = self.inner.lock_irqsave();
+            if inner.streaming {
+                return Err(V4l2Error::Busy);
+            }
+            let old: Vec<Vec<MemPlane>> = inner.buffers.drain(..).map(|vb| vb.planes).collect();
+            inner.queued_list.clear();
+            inner.done_list.clear();
+            inner.owned_by_drv_count = 0;
+            inner.sequence = 0;
+            old
+        };
+        for planes in old_planes {
+            self.alloc.release(&planes);
         }
-
-        // 释放之前的 buffer（allocator 清理）。
-        for vb in inner.buffers.drain(..) {
-            self.alloc.release(&vb.planes);
-        }
-        inner.queued_list.clear();
-        inner.done_list.clear();
-        inner.owned_by_drv_count = 0;
-        inner.sequence = 0;
 
         if count == 0 {
             return Ok(());
@@ -257,9 +276,19 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
             return Err(V4l2Error::InvalidArgument);
         }
 
+        // 分配在锁外进行，失败时已分配的需回滚释放
+        let mut new_buffers: Vec<Vb2Buffer> = Vec::with_capacity(num_buffers as usize);
         for i in 0..num_buffers {
-            let planes = self.alloc.alloc(plane_sizes)?;
-            let vb = Vb2Buffer {
+            let planes = match self.alloc.alloc(plane_sizes) {
+                Ok(p) => p,
+                Err(e) => {
+                    for vb in new_buffers.drain(..) {
+                        self.alloc.release(&vb.planes);
+                    }
+                    return Err(e);
+                }
+            };
+            new_buffers.push(Vb2Buffer {
                 index: i,
                 state: BufferState::Dequeued,
                 planes,
@@ -270,16 +299,16 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
                 timestamp_flags: 0,
                 field: 0,
                 prepared: false,
-            };
-            inner.buffers.push(vb);
+            });
         }
+        self.inner.lock_irqsave().buffers = new_buffers;
 
         Ok(())
     }
     // ── Buffer 操作 ───────────────────────────────────────────────
 
     pub fn qbuf(&self, index: u32) -> Result<(), V4l2Error> {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.lock_irqsave();
         if inner.error {
             return Err(V4l2Error::Io);
         }
@@ -306,7 +335,7 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
     }
 
     pub fn dqbuf(&self) -> Result<u32, V4l2Error> {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.lock_irqsave();
         let idx = inner.done_list.pop_front().ok_or(V4l2Error::Busy)?;
 
         let vb = &mut inner.buffers[idx as usize];
@@ -325,7 +354,7 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
     }
 
     pub fn prepare_buf(&self, index: u32) -> Result<(), V4l2Error> {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.lock_irqsave();
         if inner.error {
             return Err(V4l2Error::Io);
         }
@@ -341,7 +370,7 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
     // ── 流控制 ────────────────────────────────────────────────────
 
     pub fn streamon(&self) -> Result<(), V4l2Error> {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.lock_irqsave();
         if inner.streaming {
             return Err(V4l2Error::Busy);
         }
@@ -356,7 +385,7 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
     }
 
     pub fn streamoff(&self) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.inner.lock_irqsave();
         for i in 0..inner.buffers.len() {
             if inner.buffers[i].state == BufferState::Active {
                 log::debug!(
@@ -397,12 +426,16 @@ impl<M: Vb2MemOps> Vb2Queue<M> {
     /// buffer 元数据的快照。返回前会释放队列锁，
     /// 因此快照可以跨调用安全保存。
     pub fn buffer_snapshot(&self, index: u32) -> Option<Vb2Buffer> {
-        self.inner.lock().buffers.get(index as usize).cloned()
+        self.inner
+            .lock_irqsave()
+            .buffers
+            .get(index as usize)
+            .cloned()
     }
 
     /// 当前分配的缓冲总数（REQBUFS 协商后的实际数量）。
     pub fn num_buffers(&self) -> u32 {
-        self.inner.lock().buffers.len() as u32
+        self.inner.lock_irqsave().buffers.len() as u32
     }
 }
 

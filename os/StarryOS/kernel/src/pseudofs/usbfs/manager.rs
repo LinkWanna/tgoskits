@@ -8,7 +8,7 @@ use core::{
 use ax_runtime::hal::irq::IrqId;
 use ax_task::IrqNotify;
 use crab_usb::{
-    Device, DeviceInfo, EndpointHandle, InterfaceSession, ProbeChanges,
+    Device, DeviceInfo, EndpointHandle, InterfaceSession, IsoIrqCallback, ProbeChanges,
     usb_if::{
         endpoint::{RequestId, TransferCompletion, TransferRequest},
         err::{TransferError, USBError},
@@ -58,7 +58,7 @@ struct UsbFsState {
     devices: BTreeMap<UsbStableId, UsbDeviceRecord>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct UsbStableId {
     host_device_id: RDriveDeviceId,
     device_id: usize,
@@ -343,6 +343,20 @@ impl UsbDeviceLease {
             endpoint,
             request,
         )
+    }
+
+    pub(super) fn set_iso_irq_callback(
+        &self,
+        endpoint: u8,
+        cb: Option<IsoIrqCallback>,
+    ) -> StarryResult<()> {
+        self.manager
+            .live_set_iso_irq_callback(self.stable_id, self.session_id, endpoint, cb)
+    }
+
+    pub(super) fn halt_iso_stream(&self, endpoint: u8) -> StarryResult<()> {
+        self.manager
+            .live_halt_iso(self.stable_id, self.session_id, endpoint)
     }
 
     pub(super) fn submit_control_transfer(
@@ -1049,6 +1063,54 @@ impl UsbFsManager {
                 request_id,
             },
         })
+    }
+
+    fn live_set_iso_irq_callback(
+        &self,
+        stable_id: UsbStableId,
+        session_id: u64,
+        endpoint: u8,
+        cb: Option<IsoIrqCallback>,
+    ) -> StarryResult<()> {
+        let handle = self.live_endpoint(stable_id, session_id, endpoint)?;
+        handle.set_irq_callback(cb).map_err(map_transfer_error)
+    }
+
+    fn live_halt_iso(
+        &self,
+        stable_id: UsbStableId,
+        session_id: u64,
+        endpoint: u8,
+    ) -> StarryResult<()> {
+        let handle = self.live_endpoint(stable_id, session_id, endpoint)?;
+        let id_opt = handle.halt_iso().map_err(map_transfer_error)?;
+        if let Some(id) = id_opt {
+            // 等待该 id 完成（Cancelled/Disconnected 视为成功）
+            let res = ax_task::future::block_on(poll_fn(|cx| match handle.poll_request(id, cx) {
+                Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
+                Poll::Ready(Err(e))
+                    if matches!(
+                        e,
+                        TransferError::Cancelled
+                            | TransferError::Disconnected
+                            | TransferError::EndpointRevoked
+                    ) =>
+                {
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Ready(Err(e)) => Poll::Ready(Err(map_transfer_error(e))),
+                Poll::Pending => Poll::Pending,
+            }));
+            // halt 的控制传输本身可能 Stall，但此处仅等待 iso 通道 halt，不传播 Stall
+            // 若为 Stall 说明设备侧已停，视为成功
+            match res {
+                Ok(()) => Ok(()),
+                Err(StarryError::BrokenPipe) => Ok(()),
+                Err(e) => Err(e),
+            }
+        } else {
+            Ok(())
+        }
     }
 
     fn live_submit_control_transfer(

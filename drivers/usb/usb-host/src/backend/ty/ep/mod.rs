@@ -22,6 +22,9 @@ use super::transfer::Transfer;
 
 mod ctrl;
 
+/// 直接调用，由 UVC 提供帧拼装与 Vb2Queue 入队。零分配、关中断安全。
+pub type IsoIrqCallback = alloc::sync::Arc<dyn Fn(&[u8], &[usize]) + Send + Sync + 'static>;
+
 pub(crate) trait EndpointOp: Send + Any + 'static {
     fn submit_request(&mut self, request: TransferRequest) -> Result<RequestId, TransferError>;
 
@@ -38,6 +41,15 @@ pub(crate) trait EndpointOp: Send + Any + 'static {
 
     fn reset(&mut self) -> EndpointResetFuture {
         Box::pin(async { Err(TransferError::NotSupported) })
+    }
+
+    fn set_irq_callback(&mut self, _cb: Option<IsoIrqCallback>) -> Result<(), TransferError> {
+        Err(TransferError::NotSupported)
+    }
+
+    /// 返回被取消的 RequestId（若有），调用方需等待其完成。
+    fn halt_iso(&mut self) -> Result<Option<RequestId>, TransferError> {
+        Err(TransferError::NotSupported)
     }
 }
 
@@ -115,6 +127,14 @@ impl EndpointHandle {
 
     pub fn cancel(&self, id: RequestId) -> Result<(), TransferError> {
         self.inner.lock().raw.cancel_request(id)
+    }
+
+    pub fn set_irq_callback(&self, cb: Option<IsoIrqCallback>) -> Result<(), TransferError> {
+        self.inner.lock().raw.set_irq_callback(cb)
+    }
+
+    pub fn halt_iso(&self) -> Result<Option<RequestId>, TransferError> {
+        self.inner.lock().raw.halt_iso()
     }
 
     /// Resets host-controller state for this endpoint after a successful

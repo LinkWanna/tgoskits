@@ -4,6 +4,7 @@ use alloc::sync::Arc;
 use core::task::{Context, Poll};
 
 use crab_usb::{
+    IsoIrqCallback,
     err::USBError,
     usb_if::{
         endpoint::{TransferCompletion, TransferRequest},
@@ -84,6 +85,19 @@ impl UvcHandle for UsbDeviceHandle {
             .submit_endpoint_transfer(endpoint, TransferRequest::iso_in(data, packet_lengths))
             .map_err(map_usb_error)?;
         Ok(Arc::new(KernelIsoBatch { transfer }))
+    }
+
+    fn set_iso_irq_callback(
+        &self,
+        endpoint: u8,
+        cb: Option<IsoIrqCallback>,
+    ) -> Result<(), USBError> {
+        self.lease_set_iso_irq_callback(endpoint, cb)
+            .map_err(map_usb_error)
+    }
+
+    fn halt_iso_stream(&self, endpoint: u8) -> Result<(), USBError> {
+        self.lease_halt_iso_stream(endpoint).map_err(map_usb_error)
     }
 }
 

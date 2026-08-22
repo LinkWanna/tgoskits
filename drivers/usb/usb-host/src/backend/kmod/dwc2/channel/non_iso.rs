@@ -686,8 +686,6 @@ impl NonIsoChannelState {
             ));
         };
 
-        // DDMA 下无软件 NAK/XACT 重试：NAK 由硬件自动重试，其余故障
-        // 均以 CHHLTD + 故障位终止，直接上报。
         if let Some(fault) = hcint_fault(hcint) {
             self.stats.record_fault(fault);
             warn!(

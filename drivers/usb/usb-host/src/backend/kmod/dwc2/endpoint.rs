@@ -99,6 +99,25 @@ impl crate::backend::ty::ep::EndpointOp for Dwc2Endpoint {
         self.non_iso.submit(&self.config, request)
     }
 
+    fn set_irq_callback(
+        &mut self,
+        cb: Option<crate::backend::ty::ep::IsoIrqCallback>,
+    ) -> core::result::Result<(), TransferError> {
+        if matches!(self.config.info.transfer_type, EndpointType::Isochronous) {
+            return self.iso.set_irq_callback(cb);
+        }
+        Err(TransferError::NotSupported)
+    }
+
+    fn halt_iso(&mut self) -> core::result::Result<Option<RequestId>, TransferError> {
+        if matches!(self.config.info.transfer_type, EndpointType::Isochronous) {
+            let id_opt = self.iso.in_flight_request_id();
+            self.iso.force_halt()?;
+            return Ok(id_opt);
+        }
+        Err(TransferError::NotSupported)
+    }
+
     fn reclaim_request(
         &mut self,
         id: RequestId,

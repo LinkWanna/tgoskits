@@ -2,7 +2,7 @@ use tock_registers::interfaces::{Readable, Writeable};
 
 use crate::backend::{
     kmod::dwc2::{
-        channel::Dwc2ChannelCompletions,
+        channel::{Dwc2ChannelCompletions, iso::IsoChannelState},
         reg::{
             DWC2_MAX_CHANNELS, DWC2_RUNTIME_GINTMSK, Dwc2Registers, GINTSTS_DISCONNINT,
             GINTSTS_HCHINT, GINTSTS_PRTINT, HCINT_CHHLTD, HPRT_CONN_DET, HPRT_ENA_CHG,
@@ -92,8 +92,21 @@ impl Dwc2EventHandler {
             };
             if hcint & HCINT_CHHLTD == 0 && channel_regs.is_enabled() {
                 if self.channel_completions.is_iso(channel) {
-                    // ISO 常驻通道：XFERCOMPL（IOC）时保持通道使能并继续周期
-                    // 会话，直接发布完成位，由任务侧结算本请求。
+                    // 结算 → UVC 拼帧 → 零分配重入环，不经 publish/wake。
+                    let ptr = self.channel_completions.get_irq_iso_state(channel);
+                    if ptr != 0 {
+                        // SAFETY: ptr 来自 IsoChannelState::ensure_channel 注册的
+                        // `self as *mut _`，在 release_idle_channel/drop 时注销，
+                        // 且 handle_channel_interrupts 与其生命周期门互斥。
+                        let state = unsafe { &mut *(ptr as *mut IsoChannelState) };
+                        if state.has_irq_callback() {
+                            state.poll_channel_in_irq(hcint);
+                            self.stats.record_channel_completion();
+                            count += 1;
+                            continue;
+                        }
+                    }
+                    // 回退：无回调则走原 publish 路径（任务侧结算）。
                     self.channel_completions.publish(channel, hcint);
                     self.stats.record_channel_completion();
                     count += 1;
@@ -102,6 +115,17 @@ impl Dwc2EventHandler {
                     channel_regs.disable();
                 }
                 continue;
+            }
+            // CHHLTD 到达：无论 ISO/NON-ISO，若存在硬中断回调则仍在硬中断处理
+            let ptr = self.channel_completions.get_irq_iso_state(channel);
+            if ptr != 0 {
+                let state = unsafe { &mut *(ptr as *mut IsoChannelState) };
+                if state.has_irq_callback() {
+                    state.poll_channel_in_irq(hcint);
+                    self.stats.record_channel_completion();
+                    count += 1;
+                    continue;
+                }
             }
             self.channel_completions.publish(channel, hcint);
             self.stats.record_channel_completion();
