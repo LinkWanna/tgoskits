@@ -24,6 +24,8 @@ use axfs_ng_vfs::Filesystem;
 use axpoll::{IoEvents, PollSet, Pollable};
 use crab_usb::usb_if::endpoint::{TransferCompletion, TransferRequest};
 use event_listener::Event as NotifyEvent;
+#[cfg(feature = "sg2002-v4l2")]
+pub(crate) use manager::{SubmittedTransfer, SubmittedTransferInner};
 use starry_vm::{VmMutPtr, VmPtr, vm_load, vm_write_slice};
 
 use self::{irq::manager, manager::UsbFsManager, tree::UsbRootDir};
@@ -132,6 +134,15 @@ impl UsbDeviceHandle {
 
     pub(crate) fn bulk_out(&self, endpoint: u8, data: &[u8]) -> StarryResult<usize> {
         self.lease.bulk_out(endpoint, data)
+    }
+
+    #[cfg(feature = "sg2002-v4l2")]
+    pub(crate) fn submit_endpoint_transfer(
+        &self,
+        endpoint: u8,
+        request: TransferRequest,
+    ) -> StarryResult<SubmittedTransfer> {
+        self.lease.submit_endpoint_transfer(endpoint, request)
     }
 }
 
@@ -262,7 +273,7 @@ struct SubmittedUrb {
 
 enum SubmittedUrbTransfer {
     Live(manager::SubmittedTransfer),
-    #[cfg(all(test, not(axtest)))]
+    #[cfg(test)]
     Test(tests::TestSubmittedTransfer),
 }
 
@@ -270,7 +281,7 @@ impl SubmittedUrb {
     fn queue_key(&self) -> Option<manager::SubmittedTransferQueue> {
         match &self.transfer {
             SubmittedUrbTransfer::Live(transfer) => Some(transfer.queue_key()),
-            #[cfg(all(test, not(axtest)))]
+            #[cfg(test)]
             SubmittedUrbTransfer::Test(_) => None,
         }
     }
@@ -278,7 +289,7 @@ impl SubmittedUrb {
     fn try_reclaim(&self) -> StarryResult<Option<TransferCompletion>> {
         match &self.transfer {
             SubmittedUrbTransfer::Live(transfer) => transfer.try_reclaim(),
-            #[cfg(all(test, not(axtest)))]
+            #[cfg(test)]
             SubmittedUrbTransfer::Test(transfer) => transfer.try_reclaim(),
         }
     }
@@ -286,7 +297,7 @@ impl SubmittedUrb {
     fn poll_reclaim(&self, cx: &mut Context<'_>) -> Poll<StarryResult<TransferCompletion>> {
         match &self.transfer {
             SubmittedUrbTransfer::Live(transfer) => transfer.poll_reclaim(cx),
-            #[cfg(all(test, not(axtest)))]
+            #[cfg(test)]
             SubmittedUrbTransfer::Test(_) => Poll::Pending,
         }
     }
@@ -294,7 +305,7 @@ impl SubmittedUrb {
     fn cancel(&self) -> StarryResult<()> {
         match &self.transfer {
             SubmittedUrbTransfer::Live(transfer) => transfer.cancel(),
-            #[cfg(all(test, not(axtest)))]
+            #[cfg(test)]
             SubmittedUrbTransfer::Test(_) => Ok(()),
         }
     }
@@ -1675,7 +1686,7 @@ fn write_iso_packet_descs(
     Ok(())
 }
 
-#[cfg(all(test, not(axtest)))]
+#[cfg(test)]
 mod tests {
     extern crate std;
 

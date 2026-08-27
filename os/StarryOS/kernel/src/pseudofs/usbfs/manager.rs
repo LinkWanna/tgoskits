@@ -81,7 +81,7 @@ struct LiveInterfaceSession {
     session: InterfaceSession,
 }
 
-struct LiveDeviceState {
+pub(crate) struct LiveDeviceState {
     device: BlockingMutex<Device>,
     interfaces: BlockingMutex<BTreeMap<u8, LiveInterfaceSession>>,
 }
@@ -90,8 +90,8 @@ pub(super) struct IsoTransferResult {
     pub(super) actual_length: usize,
 }
 
-pub(super) struct SubmittedTransfer {
-    inner: SubmittedTransferInner,
+pub(crate) struct SubmittedTransfer {
+    pub(crate) inner: SubmittedTransferInner,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -100,7 +100,7 @@ pub(super) enum SubmittedTransferQueue {
     Control(usize),
 }
 
-enum SubmittedTransferInner {
+pub(crate) enum SubmittedTransferInner {
     Endpoint {
         endpoint: EndpointHandle,
         request_id: RequestId,
@@ -163,7 +163,7 @@ impl SubmittedTransfer {
         }
     }
 
-    pub(super) fn poll_reclaim(
+    pub(crate) fn poll_reclaim(
         &self,
         cx: &mut Context<'_>,
     ) -> Poll<StarryResult<TransferCompletion>> {
@@ -187,7 +187,7 @@ impl SubmittedTransfer {
         }
     }
 
-    pub(super) fn cancel(&self) -> StarryResult<()> {
+    pub(crate) fn cancel(&self) -> StarryResult<()> {
         match &self.inner {
             SubmittedTransferInner::Endpoint {
                 endpoint,
@@ -1487,7 +1487,7 @@ pub(super) fn discover_hosts() -> (Vec<UsbHostState>, Vec<PendingUsbIrqSlot>) {
     (initialized_hosts, irq_slots)
 }
 
-#[cfg(all(test, not(axtest)))]
+#[cfg(test)]
 mod tests {
     use core::cell::Cell;
 
