@@ -6,6 +6,7 @@
 
 **主线合并进度：**
 - **DWC2 USB 主机后端重构**：https://github.com/rcore-os/tgoskits/pull/2066
+- **UVC 驱动实现**：https://github.com/rcore-os/tgoskits/pull/2219
 
 ## Directory
 
@@ -51,6 +52,7 @@
 - [✅] 完善 uvc 驱动对 v4l2 框架的适配，通过 `v4l2-ctl` 工具的测试，确保摄像头的采集、编码、输出等功能正常
 - [✅] 稳定 v4l2-core 驱动框架，完善文件句柄和事件机制，保证多线程安全 
 - [✅] DWC2 重构主线合并
+- [  ] uvc 驱动主线合并
 - [  ] uvc 驱动通过 `v4l2-compliance` 全量测试
 - [  ] 完善 v4l2 相关文档及其说明
 
