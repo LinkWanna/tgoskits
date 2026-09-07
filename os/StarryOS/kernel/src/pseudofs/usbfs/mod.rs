@@ -26,6 +26,9 @@ use axfs_ng_vfs::Filesystem;
 use axpoll::{ExclusiveRegistrationSink, IoEvents, Pollable, SharedRegistrationSink};
 use axpoll_set::PollSet;
 use crab_usb::usb_if::endpoint::{TransferCompletion, TransferRequest};
+use event_listener::Event as NotifyEvent;
+#[cfg(feature = "uvc")]
+pub(crate) use manager::{SubmittedTransfer, SubmittedTransferInner};
 
 use self::{irq::manager, manager::UsbFsManager, tree::UsbRootDir};
 use crate::{
@@ -153,6 +156,15 @@ impl UsbDeviceHandle {
 
     pub(crate) fn bulk_out(&self, endpoint: u8, data: &[u8]) -> StarryResult<usize> {
         self.lease.bulk_out(endpoint, data)
+    }
+
+    #[cfg(feature = "uvc")]
+    pub(crate) fn submit_endpoint_transfer(
+        &self,
+        endpoint: u8,
+        request: TransferRequest,
+    ) -> StarryResult<SubmittedTransfer> {
+        self.lease.submit_endpoint_transfer(endpoint, request)
     }
 }
 
