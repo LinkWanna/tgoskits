@@ -2,16 +2,16 @@
 
 use alloc::{
     borrow::ToOwned,
-    collections::binary_heap::BinaryHeap,
     sync::{Arc, Weak},
+    vec::Vec,
 };
 use core::{mem, time::Duration};
 
 use ax_lazyinit::LazyLock;
-use ax_runtime::hal::time::{NANOS_PER_SEC, TimeValue, monotonic_time_nanos, wall_time};
+use ax_runtime::hal::time::{NANOS_PER_SEC, TimeValue, monotonic_time, monotonic_time_nanos, wall_time};
 use ax_task::{
     WeakAxTaskRef, current,
-    future::{block_on, timeout_at_wall},
+    future::{block_on, timeout_at},
 };
 use event_listener::{Event, listener};
 use starry_signal::Signo;
@@ -19,7 +19,7 @@ use strum::FromRepr;
 
 use crate::{
     sync::IrqMutex as Mutex,
-    task::{PidIdentity, poll_process_timer, poll_timer},
+    task::{PidIdentity, poll_process_alarm, poll_timer},
 };
 
 fn time_value_from_nanos(nanos: usize) -> TimeValue {
@@ -34,33 +34,32 @@ pub enum AlarmTarget {
     Process(Weak<PidIdentity>),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AlarmDeadline {
+    Monotonic(TimeValue),
+    Realtime(TimeValue),
+}
+
+impl AlarmDeadline {
+    pub(super) fn remaining(self) -> Duration {
+        match self {
+            Self::Monotonic(deadline) => deadline.saturating_sub(monotonic_time()),
+            Self::Realtime(deadline) => deadline.saturating_sub(wall_time()),
+        }
+    }
+
+    pub(super) fn is_due(self) -> bool {
+        self.remaining().is_zero()
+    }
+
+}
+
 struct Entry {
-    deadline: Duration,
+    deadline: AlarmDeadline,
     target: AlarmTarget,
 }
 
-impl PartialEq for Entry {
-    fn eq(&self, other: &Self) -> bool {
-        self.deadline == other.deadline
-    }
-}
-
-impl Eq for Entry {}
-
-impl PartialOrd for Entry {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Entry {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        other.deadline.cmp(&self.deadline)
-    }
-}
-
-static ALARM_LIST: LazyLock<Mutex<BinaryHeap<Entry>>> =
-    LazyLock::new(|| Mutex::new(BinaryHeap::new()));
+static ALARM_LIST: LazyLock<Mutex<Vec<Entry>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 static EVENT_NEW_TIMER: LazyLock<Event> = LazyLock::new(Event::new);
 
@@ -120,7 +119,7 @@ impl ITimer {
 
     pub fn renew_timer(&self) {
         if self.remained_ns > 0 {
-            let deadline = wall_time() + Duration::from_nanos(self.remained_ns as u64);
+            let deadline = monotonic_time() + Duration::from_nanos(self.remained_ns as u64);
             register_alarm(deadline);
         }
     }
@@ -144,8 +143,11 @@ impl ProcessRealTimer {
         let old = self.get();
         self.interval = TimeValue::from_nanos(interval_ns as u64);
         self.deadline = (remaining_ns != 0).then(|| {
-            let deadline = wall_time() + TimeValue::from_nanos(remaining_ns as u64);
-            register_alarm_for(deadline, AlarmTarget::Process(Arc::downgrade(identity)));
+            let deadline = monotonic_time() + TimeValue::from_nanos(remaining_ns as u64);
+            register_alarm_for(
+                AlarmDeadline::Monotonic(deadline),
+                AlarmTarget::Process(Arc::downgrade(identity)),
+            );
             deadline
         });
         old
@@ -155,7 +157,7 @@ impl ProcessRealTimer {
     pub fn get(&self) -> (TimeValue, TimeValue) {
         let remaining = self
             .deadline
-            .map(|deadline| deadline.saturating_sub(wall_time()))
+            .map(|deadline| deadline.saturating_sub(monotonic_time()))
             .unwrap_or_default();
         (self.interval, remaining)
     }
@@ -165,38 +167,43 @@ impl ProcessRealTimer {
         let Some(deadline) = self.deadline else {
             return false;
         };
-        if wall_time() < deadline {
+        if monotonic_time() < deadline {
             return false;
         }
 
         if self.interval.is_zero() {
             self.deadline = None;
         } else {
-            let deadline = wall_time() + self.interval;
+            let deadline = monotonic_time() + self.interval;
             self.deadline = Some(deadline);
-            register_alarm_for(deadline, AlarmTarget::Process(Arc::downgrade(identity)));
+            register_alarm_for(
+                AlarmDeadline::Monotonic(deadline),
+                AlarmTarget::Process(Arc::downgrade(identity)),
+            );
         }
         true
     }
 }
 
-/// Register an alarm at the given wall-clock deadline for the current task.
-/// Used by both ITimer and POSIX timers.
+/// Register an alarm at the given monotonic deadline for the current task.
 pub fn register_alarm(deadline: Duration) {
-    register_alarm_for(deadline, AlarmTarget::Thread(Arc::downgrade(&current())));
+    register_alarm_for(
+        AlarmDeadline::Monotonic(deadline),
+        AlarmTarget::Thread(Arc::downgrade(&current())),
+    );
 }
 
-/// Register an alarm at the given wall-clock deadline for a specific target.
-/// Used when re-arming periodic POSIX timers from the alarm_task context,
-/// where `current()` is the alarm_task, not the user task.
-pub fn register_alarm_for(deadline: Duration, target: AlarmTarget) {
+/// Register an alarm in an explicit clock domain for a specific target.
+pub(super) fn register_alarm_for(deadline: AlarmDeadline, target: AlarmTarget) {
     let mut guard = ALARM_LIST.lock();
-    let should_wake = guard.peek().is_none_or(|it| it.deadline > deadline);
     guard.push(Entry { deadline, target });
     drop(guard);
-    if should_wake {
-        EVENT_NEW_TIMER.notify(1);
-    }
+    EVENT_NEW_TIMER.notify(1);
+}
+
+/// Wake the alarm dispatcher so realtime entries are re-evaluated.
+pub(crate) fn notify_realtime_clock_changed() {
+    EVENT_NEW_TIMER.notify(1);
 }
 
 /// Represents the state of the timer.
@@ -342,26 +349,23 @@ impl TimeManager {
 
 async fn alarm_task() {
     loop {
+        listener!(EVENT_NEW_TIMER => listener);
         let mut guard = ALARM_LIST.lock();
-        let Some(entry) = guard.peek() else {
+        let Some((index, _)) = guard
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.deadline.remaining())
+        else {
             drop(guard);
-            listener!(EVENT_NEW_TIMER => listener);
-
-            if !ALARM_LIST.lock().is_empty() {
-                continue;
-            }
             listener.await;
-
             continue;
         };
 
-        let now = wall_time();
-        if entry.deadline <= now {
-            let entry_deadline = entry.deadline;
-            let target = entry.target.clone();
-            assert!(guard.pop().is_some_and(|it| it.deadline == entry_deadline));
+        let remaining = guard[index].deadline.remaining();
+        if guard[index].deadline.is_due() {
+            let entry = guard.swap_remove(index);
             drop(guard);
-            match target {
+            match entry.target {
                 AlarmTarget::Thread(weak_task) => {
                     if let Some(task) = weak_task.upgrade() {
                         poll_timer(&task);
@@ -369,22 +373,14 @@ async fn alarm_task() {
                 }
                 AlarmTarget::Process(identity) => {
                     if let Some(identity) = identity.upgrade() {
-                        poll_process_timer(&identity);
+                        poll_process_alarm(&identity, entry.deadline);
                     }
                 }
             }
         } else {
-            let deadline = entry.deadline;
             drop(guard);
-            listener!(EVENT_NEW_TIMER => listener);
-            if ALARM_LIST
-                .lock()
-                .peek()
-                .is_none_or(|it| it.deadline != deadline)
-            {
-                continue;
-            }
-            let _ = timeout_at_wall(Some(deadline), listener).await;
+            let deadline = monotonic_time().saturating_add(remaining);
+            let _ = timeout_at(Some(deadline), listener).await;
         }
     }
 }
@@ -416,6 +412,156 @@ fn itimer_type_signo_and_time_conversion_rules_hold_for_test() -> bool {
 
 #[cfg(all(test, not(axtest)))]
 mod tests {
+    use super::*;
+    use crate::task::{
+        pid::{new_test_pid_namespace, new_test_process_identity},
+        posix_timer::{PosixTimerTable, TimerSpec},
+    };
+
+    fn take_process_alarm(owner: &Arc<PidIdentity>) -> Option<Entry> {
+        let mut alarms = ALARM_LIST.lock();
+        let index = alarms.iter().position(|entry| {
+            matches!(&entry.target, AlarmTarget::Process(weak) if Weak::ptr_eq(weak, &Arc::downgrade(owner)))
+        })?;
+        Some(alarms.swap_remove(index))
+    }
+
+    #[test]
+    fn realtime_alarm_survives_clock_rollback_after_dequeue() {
+        use ax_runtime::hal::time::set_wall_time;
+        use linux_raw_sys::general::{CLOCK_REALTIME, SIGEV_SIGNAL};
+
+        struct RestoreClock(TimeValue);
+        impl Drop for RestoreClock {
+            fn drop(&mut self) {
+                set_wall_time(self.0).unwrap();
+            }
+        }
+        let _restore = RestoreClock(wall_time());
+        let namespace = new_test_pid_namespace();
+        let (owner, _tgid) = new_test_process_identity(&namespace);
+        let timers = PosixTimerTable::default();
+        let id = timers
+            .create(CLOCK_REALTIME, SIGEV_SIGNAL, Signo::SIGALRM as i32, 17)
+            .unwrap();
+        set_wall_time(Duration::from_secs(5)).unwrap();
+        timers
+            .settime(
+                &owner,
+                id,
+                1,
+                TimerSpec {
+                    value_sec: 10,
+                    value_nsec: 0,
+                    interval_sec: 0,
+                    interval_nsec: 0,
+                },
+            )
+            .unwrap();
+
+        set_wall_time(Duration::from_secs(10)).unwrap();
+        let entry = take_process_alarm(&owner).expect("timer_settime must register an alarm");
+        assert!(entry.deadline.is_due());
+        // The dispatcher has consumed the registration, but another CPU can
+        // set CLOCK_REALTIME before the timer table is locked and polled.
+        set_wall_time(Duration::from_secs(5)).unwrap();
+        let mut signals = 0;
+        timers.poll_dequeued_alarm(&owner, entry.deadline, |_| signals += 1);
+        assert_eq!(signals, 0, "clock rollback must postpone expiration");
+        let retry = take_process_alarm(&owner)
+            .expect("clock rollback after dequeue lost the POSIX timer registration");
+        assert_eq!(retry.deadline, entry.deadline);
+        assert!(
+            take_process_alarm(&owner).is_none(),
+            "one consumed alarm needs one replacement"
+        );
+
+        set_wall_time(Duration::from_secs(10)).unwrap();
+        timers.poll_dequeued_alarm(&owner, retry.deadline, |_| signals += 1);
+        assert_eq!(signals, 1);
+        assert_eq!(timers.gettime(id).unwrap().1, 0);
+        assert!(
+            take_process_alarm(&owner).is_none(),
+            "one-shot timer must stay disarmed"
+        );
+
+        // A process registration can match several timers. Restoring it must
+        // not multiply registrations, including across repeated clock steps.
+        let second = timers
+            .create(CLOCK_REALTIME, SIGEV_SIGNAL, Signo::SIGALRM as i32, 18)
+            .unwrap();
+        set_wall_time(Duration::from_secs(5)).unwrap();
+        for timer_id in [id, second] {
+            timers
+                .settime(
+                    &owner,
+                    timer_id,
+                    1,
+                    TimerSpec {
+                        value_sec: 10,
+                        value_nsec: 0,
+                        interval_sec: 1,
+                        interval_nsec: 0,
+                    },
+                )
+                .unwrap();
+        }
+        for _ in 0..3 {
+            set_wall_time(Duration::from_secs(10)).unwrap();
+            let entry = take_process_alarm(&owner).unwrap();
+            set_wall_time(Duration::from_secs(5)).unwrap();
+            timers.poll_dequeued_alarm(&owner, entry.deadline, |_| {
+                panic!("timer fired after rollback")
+            });
+            timers.poll_expired(&owner, |_| panic!("syscall poll fired after rollback"));
+            let first = take_process_alarm(&owner).unwrap();
+            let second = take_process_alarm(&owner).unwrap();
+            assert!(
+                take_process_alarm(&owner).is_none(),
+                "shared deadlines multiplied alarms"
+            );
+            register_alarm_for(first.deadline, first.target);
+            register_alarm_for(second.deadline, second.target);
+        }
+        set_wall_time(Duration::from_secs(10)).unwrap();
+        let entry = take_process_alarm(&owner).unwrap();
+        timers.poll_dequeued_alarm(&owner, entry.deadline, |_| signals += 1);
+        assert_eq!(signals, 3, "both periodic timers must still expire");
+        assert_eq!(timers.gettime(id).unwrap().1, NANOS_PER_SEC);
+        assert_eq!(timers.gettime(second).unwrap().1, NANOS_PER_SEC);
+        while take_process_alarm(&owner).is_some() {}
+
+        // A stale dequeued alarm must not resurrect a deleted timer or the
+        // previous deadline of a concurrently reset timer.
+        timers.delete(second);
+        timers
+            .settime(
+                &owner,
+                id,
+                1,
+                TimerSpec {
+                    value_sec: 20,
+                    value_nsec: 0,
+                    interval_sec: 0,
+                    interval_nsec: 0,
+                },
+            )
+            .unwrap();
+        let reset = take_process_alarm(&owner).unwrap();
+        set_wall_time(Duration::from_secs(5)).unwrap();
+        timers.poll_dequeued_alarm(&owner, entry.deadline, |_| panic!("stale alarm fired"));
+        assert!(
+            take_process_alarm(&owner).is_none(),
+            "stale deadline was restored"
+        );
+        timers.delete(id);
+        timers.poll_dequeued_alarm(&owner, reset.deadline, |_| panic!("deleted timer fired"));
+        assert!(
+            take_process_alarm(&owner).is_none(),
+            "deleted timer was restored"
+        );
+    }
+
     #[test]
     fn itimer_type_signo_and_time_conversion_rules_hold() {
         assert!(super::itimer_type_signo_and_time_conversion_rules_hold_for_test());
