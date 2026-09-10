@@ -1,111 +1,68 @@
-<h1 align="center">TGOSKits</h1>
+## Introduce
 
-<p align="center">An integrated Rust workspace for operating system and virtualization development</p>
+本仓库用于为 Tgoskits 适配 v4l2 子系统，以满足在 StarryOS 上使用摄像头、视频采集、视频编码等需求。
 
-<div align="center">
+由于 StarryOS 目前的 USB 协议栈对于流式采集/实时采集的支持不够完善，因此我在一定程度上重构了上游的 DWC2 USB 主机后端实现，以支持 UVC 摄像头的实时采集。
 
-[![Build & Test](https://github.com/rcore-os/tgoskits/actions/workflows/ci.yml/badge.svg)](https://github.com/rcore-os/tgoskits/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/edition-2024-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+**主线合并进度：**
+- **DWC2 USB 主机后端重构**：https://github.com/rcore-os/tgoskits/pull/2066
+- **UVC 驱动实现**：https://github.com/rcore-os/tgoskits/pull/2219
 
-</div>
+## Hack 说明
 
-English | [中文](README_CN.md)
+由于当前的 v4l 实现依旧存在一些问题，还在积极处理中，同时主线内核的调度器也没有办法完全支持摄像头的实时采集，因此这里提供一个 Hack 版本的 v4l 子系统。
 
-## 1. Introduction
+Hack 部分仅涉及 DWC2 驱动和 UVC 驱动，主要是将图像的拼帧工作从 task 中移动到硬中断的上下文中，以减少调度器的干扰，从而实现更低的采集延迟。
 
-TGOSKits is an integrated repository for operating system and virtualization development. It brings together ArceOS, StarryOS, Axvisor, shared components, platform crates, and driver infrastructure in one workspace. A unified `cargo xtask` entry point is used for build, run, debug, and test workflows, making the repository suitable for component development, cross-system integration, and system-level validation.
+## Usage
 
-Project site: [https://rcore-os.cn/tgoskits/](https://rcore-os.cn/tgoskits/). To understand the project scope and system relationships, start from the [TGOSKits documentation](https://rcore-os.cn/tgoskits/docs/introduction).
+### 内核构建
 
-## 2. Repository
+```sh
+# 启用默认配置
+cargo starry defconfig aka-00-sg2002
 
-TGOSKits brings multiple standalone subprojects into the root repository through Git Subtree and provides unified entry points for building, running, testing, and documentation. The main directories are:
+# 修改 tmp/axbuild/config/starryos/build-riscv64gc-unknown-none-elf.toml 下的 features
+features = [
+  "starry-kernel/sg2002",
+  "starry-kernel/uvc",
+  "axplat-dyn/thead-mae",
+  "ax-driver/serial",
+  "ax-driver/sg2002-dwc2",
+  "ax-driver/cv181x-sdhci",
+]
+log = "Info"
+target = "riscv64gc-unknown-none-elf"
 
-```text
-tgoskits/
-├── components/                # reusable component crates
-├── os/
-│   ├── arceos/                # ArceOS modular kernel
-│   ├── StarryOS/              # StarryOS Linux-compatible OS
-│   └── axvisor/               # Axvisor Type-I Hypervisor
-├── platform/                  # platform and board support crates
-├── drivers/                   # reusable drivers and driver subsystems
-├── test-suit/                 # system-level test cases
-├── xtask/                     # unified root command entry
-├── scripts/                   # repository maintenance, test, and sync scripts
-└── docs/                      # Docusaurus documentation site
+# 构建内核
+cargo starry build
+
+# 利用 mkimage 生成 uImage
+sh scripts/mk-boot-sd.sh
+
+# 将生成的 uImage 拷贝到 SD 卡中替代 boot 分区原有的 boot.sd
 ```
 
-For subtree synchronization, component layering, and development conventions, see [repository structure and collaboration](https://rcore-os.cn/tgoskits/docs/contributing/repo) and the [architecture overview](https://rcore-os.cn/tgoskits/docs/architecture/overview).
+### 根文件系统构建
 
-## 3. Quick Experience
+仓库 [sg2002_inference](https://github.com/LinkWanna/sg2002_inference) 的 Release 中提供了一个根文件系统。
 
-### 3.1 Environment Setup
+## 限制
 
-For a first run, the recommended path is to use the project container image. It already includes the Rust toolchain, QEMU, and common cross-compilation dependencies, matching the CI environment:
+下面是当前测试所使用的摄像头的格式列表，如果使用其他摄像头，并且不是 YUYV422 格式，那么 `sg2002_inference` 的代码就需要进行修改。
+```sh
+➜  uvc-hack git:(uvc-hack) ✗ v4l2-ctl -d /dev/video2 --list-formats-ext
+ioctl: VIDIOC_ENUM_FMT
+        Type: Video Capture
 
-```bash
-git clone https://github.com/rcore-os/tgoskits.git
-cd tgoskits
-
-docker pull ghcr.io/rcore-os/tgoskits-container:latest
-docker run -it --rm \
-  -v "$(pwd)":/workspace \
-  -w /workspace \
-  ghcr.io/rcore-os/tgoskits-container:latest
+        [0]: 'MJPG' (Motion-JPEG, compressed)
+                Size: Discrete 1280x720
+                        Interval: Discrete 0.017s (60.000 fps)
+                Size: Discrete 640x480
+                        Interval: Discrete 0.017s (60.000 fps)
+        [1]: 'YUYV' (YUYV 4:2:2)
+                Size: Discrete 1280x720
+                        Interval: Discrete 0.100s (10.000 fps)
+                Size: Discrete 640x480
+                        Interval: Discrete 0.033s (30.000 fps)
 ```
-
-If you do not use the container, prepare at least Rust, basic build tools, and common QEMU packages. The recommended QEMU version is 10.2.1, matching the container and CI environment; distribution packages are usually enough for quick trials, but switch to the container if a target is missing or behavior differs:
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-sudo apt update
-sudo apt install -y cmake make ninja-build pkg-config e2fsprogs fakeroot
-sudo apt install -y qemu-system-arm qemu-system-riscv64 qemu-system-x86
-cargo install cargo-binutils
-```
-
-See [quick start overview](https://rcore-os.cn/tgoskits/docs/quickstart/overview) and [CI and container images](https://rcore-os.cn/tgoskits/docs/build/ci) for the full environment guide.
-
-### 3.2 QEMU Verification
-
-First confirm that common QEMU commands are available, preferably matching QEMU 10.2.1 from the container and CI environment:
-
-```bash
-qemu-system-riscv64 --version
-qemu-system-aarch64 --version
-qemu-system-x86_64 --version
-qemu-system-loongarch64 --version
-```
-
-Then use the unified `cargo xtask` entry point to run the three system paths:
-
-```bash
-# ArceOS: run the default Hello World
-cargo xtask arceos qemu --arch aarch64
-
-# StarryOS: prepare rootfs before the first run
-cargo xtask starry rootfs --arch aarch64
-cargo xtask starry qemu --arch aarch64
-
-# Axvisor: run a Hypervisor QEMU scenario
-cargo xtask axvisor qemu --arch aarch64
-```
-
-If you only want the shortest path to a successful run, start with the default ArceOS Hello World app. Pass `--package arceos-shell` when you specifically need the interactive Shell. For more systems, architecture combinations, and QEMU options, see the [quick start overview](https://rcore-os.cn/tgoskits/docs/quickstart/overview) and [run and QEMU](https://rcore-os.cn/tgoskits/docs/build/run).
-
-## 4. Contributing
-
-Issues and pull requests are welcome. A typical workflow is:
-
-1. Read [repository structure and collaboration](https://rcore-os.cn/tgoskits/docs/contributing/repo).
-2. Create a feature branch from `dev`.
-3. Run the relevant `cargo xtask` build, test, or clippy checks after making changes.
-4. Open a PR and describe the change scope, validation, and impact.
-
-For a full development example, documentation contribution, and rootfs maintenance notes, see the [contribution docs](https://rcore-os.cn/tgoskits/docs/contributing/demo). Use [GitHub Issues](https://github.com/rcore-os/tgoskits/issues) for feedback and [GitHub Pull Requests](https://github.com/rcore-os/tgoskits/pulls) for patches.
-
-## 5. License
-
-TGOSKits as a whole is licensed under [Apache-2.0](./LICENSE). Some subtree components may include their own license files; if there is any difference, use the license file in the component directory as the source of truth.
