@@ -8,7 +8,7 @@ use core::{
 use ax_runtime::hal::irq::IrqId;
 use ax_task::IrqNotify;
 use crab_usb::{
-    Device, DeviceInfo, EndpointHandle, InterfaceSession, ProbeChanges,
+    Device, DeviceInfo, EndpointHandle, InterfaceSession, IsoIrqCallback, ProbeChanges,
     usb_if::{
         endpoint::{RequestId, TransferCompletion, TransferRequest},
         err::{TransferError, USBError},
@@ -343,6 +343,22 @@ impl UsbDeviceLease {
             endpoint,
             request,
         )
+    }
+
+    #[cfg(feature = "uvc")]
+    pub(super) fn set_iso_irq_callback(
+        &self,
+        endpoint: u8,
+        cb: Option<IsoIrqCallback>,
+    ) -> StarryResult<()> {
+        self.manager
+            .live_set_iso_irq_callback(self.stable_id, self.session_id, endpoint, cb)
+    }
+
+    #[cfg(feature = "uvc")]
+    pub(super) fn halt_iso_stream(&self, endpoint: u8) -> StarryResult<()> {
+        self.manager
+            .live_halt_iso(self.stable_id, self.session_id, endpoint)
     }
 
     pub(super) fn submit_control_transfer(
@@ -1032,6 +1048,53 @@ impl UsbFsManager {
         let endpoint = self.live_endpoint(stable_id, session_id, endpoint)?;
         wait_endpoint(endpoint, TransferRequest::iso_out(data, packet_lengths))
             .map(|completion| completion.actual_length)
+    }
+
+    #[cfg(feature = "uvc")]
+    fn live_set_iso_irq_callback(
+        &self,
+        stable_id: UsbStableId,
+        session_id: u64,
+        endpoint: u8,
+        cb: Option<IsoIrqCallback>,
+    ) -> StarryResult<()> {
+        let handle = self.live_endpoint(stable_id, session_id, endpoint)?;
+        handle.set_irq_callback(cb).map_err(map_transfer_error)
+    }
+
+    #[cfg(feature = "uvc")]
+    fn live_halt_iso(
+        &self,
+        stable_id: UsbStableId,
+        session_id: u64,
+        endpoint: u8,
+    ) -> StarryResult<()> {
+        let handle = self.live_endpoint(stable_id, session_id, endpoint)?;
+        let id_opt = handle.halt_iso().map_err(map_transfer_error)?;
+        if let Some(id) = id_opt {
+            let res = ax_task::future::block_on(poll_fn(|cx| match handle.poll_request(id, cx) {
+                Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
+                Poll::Ready(Err(e))
+                    if matches!(
+                        e,
+                        TransferError::Cancelled
+                            | TransferError::Disconnected
+                            | TransferError::EndpointRevoked
+                    ) =>
+                {
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Ready(Err(e)) => Poll::Ready(Err(map_transfer_error(e))),
+                Poll::Pending => Poll::Pending,
+            }));
+            match res {
+                Ok(()) => Ok(()),
+                Err(StarryError::BrokenPipe) => Ok(()),
+                Err(e) => Err(e),
+            }
+        } else {
+            Ok(())
+        }
     }
 
     fn live_submit_endpoint_transfer(

@@ -3,7 +3,8 @@
 use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
 use core::task::{Context, Poll};
 
-use ax_media::videobuffer::{FrameGuard, VbMemOps, VbPoolLease};
+use ax_media::videobuffer::{ActiveFrame, FrameGuard, VbMemOps, VbPool, VbPoolLease};
+use ax_sync::SpinLock;
 use crab_usb::{
     EndpointHandle,
     usb_if::{
@@ -151,6 +152,135 @@ impl<M: VbMemOps> FrameAssembler<M> {
     ) -> PushOutcome {
         let dest = guard.as_mut_slice();
         parser.push_packet(pkt, dest)
+    }
+}
+
+/// 硬中断上下文拼帧：无分配、无可睡锁、无格式化。
+pub(crate) struct IrqCaptureContext<M: VbMemOps> {
+    pub(crate) pool: Arc<VbPool<M>>,
+    pub(crate) session: SpinLock<IrqSession>,
+    pub(crate) slot_len: usize,
+}
+
+pub(crate) struct IrqSession {
+    parser: FrameParser,
+    current: Option<ActiveFrame>,
+    expected_bytes: Option<usize>,
+}
+
+impl<M: VbMemOps> IrqCaptureContext<M> {
+    pub(crate) fn new(pool: Arc<VbPool<M>>, expected: Option<usize>, slot_len: usize) -> Self {
+        Self {
+            pool,
+            session: SpinLock::new(IrqSession {
+                parser: FrameParser::new(),
+                current: None,
+                expected_bytes: expected,
+            }),
+            slot_len,
+        }
+    }
+
+    /// 硬中断上下文拼帧：无分配、无可睡锁。
+    pub(crate) fn handle_irq_batch(&self, data: &[u8], actuals: &[usize], slot_len: usize) {
+        let mut session = self.session.lock_irqsave();
+        // 确保有一个 Active 帧（饥饿时为 None，后续以空切片跟踪头）
+        if session.current.is_none() {
+            session.current = self.pool.acquire_frame();
+        }
+        for (i, &actual) in actuals.iter().enumerate() {
+            if actual == 0 {
+                continue;
+            }
+            if actual < 2 {
+                continue;
+            }
+            let pkt = &data[i * slot_len..i * slot_len + actual];
+            Self::process_one_packet_irq(&mut session, &self.pool, pkt);
+        }
+        // 保留 current 以便跨批续帧；若当前帧已提交，current 已在 process_one_packet_irq 内更新
+    }
+
+    fn process_one_packet_irq(session: &mut IrqSession, pool: &VbPool<M>, pkt: &[u8]) {
+        let expected = session.expected_bytes;
+        // 取当前帧的可写切片，或空切片（饥饿跟踪）
+        let dest: &mut [u8] = match session.current.as_mut() {
+            Some(frame) => unsafe { core::slice::from_raw_parts_mut(frame.data_ptr, frame.len) },
+            None => &mut [],
+        };
+        // 需要可变的 parser 借用与 dest，切分以避免双重借用
+        let parser = &mut session.parser;
+        let outcome = parser.push_packet(pkt, dest);
+        match outcome {
+            PushOutcome::Pending => {}
+            PushOutcome::Completed { bytes } => {
+                let valid = expected.is_none_or(|exp| bytes == exp);
+                if valid {
+                    if let Some(frame) = session.current.take() {
+                        pool.commit_frame(frame, bytes as u32);
+                    }
+                    session.current = pool.acquire_frame();
+                } else {
+                    // 截断帧：不提交，保留 current 缓冲（filled 已在 parser.finish_frame 清零）
+                    // 下一包将从 0 覆盖同一缓冲
+                }
+            }
+            PushOutcome::CompletedAndRetry { bytes } => {
+                let valid = expected.is_none_or(|exp| bytes == exp);
+                if valid {
+                    if let Some(frame) = session.current.take() {
+                        pool.commit_frame(frame, bytes as u32);
+                    }
+                    session.current = pool.acquire_frame();
+                    let dest2: &mut [u8] = match session.current.as_mut() {
+                        Some(frame) => unsafe {
+                            core::slice::from_raw_parts_mut(frame.data_ptr, frame.len)
+                        },
+                        None => &mut [],
+                    };
+                    let outcome2 = session.parser.push_packet(pkt, dest2);
+                    match outcome2 {
+                        PushOutcome::Completed { bytes } => {
+                            let valid2 = expected.is_none_or(|exp| bytes == exp);
+                            if valid2 {
+                                if let Some(frame) = session.current.take() {
+                                    pool.commit_frame(frame, bytes as u32);
+                                }
+                                session.current = pool.acquire_frame();
+                            } else {
+                                // 丢弃截断
+                            }
+                        }
+                        PushOutcome::Pending => {}
+                        PushOutcome::CompletedAndRetry { .. } => {
+                            debug_assert!(false, "parser must not retry twice");
+                        }
+                    }
+                } else {
+                    // 截断：不提交，复用同一缓冲重试
+                    let dest2: &mut [u8] = match session.current.as_mut() {
+                        Some(frame) => unsafe {
+                            core::slice::from_raw_parts_mut(frame.data_ptr, frame.len)
+                        },
+                        None => &mut [],
+                    };
+                    let outcome2 = session.parser.push_packet(pkt, dest2);
+                    match outcome2 {
+                        PushOutcome::Completed { bytes } => {
+                            let valid2 = expected.is_none_or(|exp| bytes == exp);
+                            if valid2 {
+                                if let Some(frame) = session.current.take() {
+                                    pool.commit_frame(frame, bytes as u32);
+                                }
+                                session.current = pool.acquire_frame();
+                            }
+                        }
+                        PushOutcome::Pending => {}
+                        PushOutcome::CompletedAndRetry { .. } => unreachable!(),
+                    }
+                }
+            }
+        }
     }
 }
 

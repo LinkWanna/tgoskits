@@ -125,10 +125,10 @@ pub struct VbBuffer {
 
 /// 活动缓冲句柄——仅含裸指针与索引
 #[must_use]
-pub(crate) struct ActiveFrame {
-    pub(crate) buffer_index: u32,
-    pub(crate) data_ptr: *mut u8,
-    pub(crate) len: usize,
+pub struct ActiveFrame {
+    pub buffer_index: u32,
+    pub data_ptr: *mut u8,
+    pub len: usize,
 }
 
 // SAFETY: `ptr` 指向的 vmalloc 段在 Guard 期间独占且稳定。

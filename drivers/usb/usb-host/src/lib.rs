@@ -22,7 +22,10 @@ pub use host::*;
 #[allow(unused_imports)]
 #[cfg(kmod)]
 pub use crate::backend::kmod::*;
-pub use crate::backend::ty::{Event, ep::EndpointHandle};
+pub use crate::backend::ty::{
+    Event,
+    ep::{EndpointHandle, IsoIrqCallback},
+};
 
 define_int_type!(BusAddr, u64);
 

@@ -16,6 +16,7 @@ use ax_media::{
 };
 use ax_sync::Mutex;
 use crab_usb::{
+    IsoIrqCallback,
     err::USBError,
     usb_if::{
         descriptor::Class,
@@ -30,7 +31,7 @@ pub use stream::IsoPending;
 use crate::{
     frame::FrameParser,
     helper::{parse_stream_control, parse_uvc_device},
-    stream::{FrameAssembler, ISO_BATCH, ISO_DEPTH, IsoStream},
+    stream::{FrameAssembler, ISO_BATCH, ISO_DEPTH, IrqCaptureContext, IsoStream},
 };
 
 pub(crate) mod controls;
@@ -56,6 +57,18 @@ pub trait UvcHandle: Send + Sync + 'static {
         endpoint: u8,
         request: TransferRequest,
     ) -> Result<IsoPending, USBError>;
+
+    fn set_iso_irq_callback(
+        &self,
+        _endpoint: u8,
+        _cb: Option<IsoIrqCallback>,
+    ) -> Result<(), USBError> {
+        Err(USBError::NotSupported)
+    }
+
+    fn halt_iso_stream(&self, _endpoint: u8) -> Result<(), USBError> {
+        Err(USBError::NotSupported)
+    }
 }
 
 /// UVC frame interval description – strongly typed over the raw
@@ -260,6 +273,13 @@ pub(crate) struct IsoStreamWorker {
     cancel: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
+struct IrqStream {
+    ctx: Arc<IrqCaptureContext<VirtualAllocator>>,
+    slots: Vec<Vec<u8>>,
+    endpoint: u8,
+}
+
 pub struct UvcDevice<H: UvcHandle> {
     handle: Arc<H>,
     vs_iface_num: u8,
@@ -271,6 +291,7 @@ pub struct UvcDevice<H: UvcHandle> {
     pub(crate) ctrls: CtrlHandler,
     pub(crate) pool: Arc<VbPool<VirtualAllocator>>,
     stream: Mutex<Option<IsoStreamWorker>>,
+    irq_stream: Mutex<Option<IrqStream>>,
     events: Arc<Mutex<Vec<ax_media::interface::event::Event>>>,
     pub(crate) cur_frame_interval: Mutex<u32>,
 }
@@ -364,6 +385,7 @@ impl<H: UvcHandle> UvcDevice<H> {
             active_alt_setting: 0,
             pool: Arc::new(VbPool::new(VirtualAllocator::new(), 2, 8)),
             stream: Mutex::new(None),
+            irq_stream: Mutex::new(None),
             events: Arc::new(Mutex::new(Vec::new())),
             cur_frame_interval: Mutex::new(initial_interval),
         };
@@ -444,38 +466,108 @@ impl<H: UvcHandle> UvcDevice<H> {
             best.packets_per_uframe,
             best.interval,
         );
-        self.handle
+        if let Err(e) = self
+            .handle
             .claim_interface(self.vs_iface_num, best.alt_setting)
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to claim interface {} alt {}: {:?}",
-                    self.vs_iface_num,
-                    best.alt_setting,
-                    e
-                )
-            })?;
+        {
+            error!(
+                "[UVC] claim_interface vs={} alt={} failed: {e:?}",
+                self.vs_iface_num, best.alt_setting
+            );
+            return Err(e);
+        }
 
-        let packet_len = best.buf_len();
+        let slot_len = best.buf_len();
         info!(
-            "[UVC] start_streaming: iso worker ep={:#x} batch={} packet_len={} depth={} buf={}",
+            "[UVC] start_streaming(irq): ep={:#x} batch={} slot_len={} depth={} buf={}",
             best.ep,
             ISO_BATCH,
-            packet_len,
+            slot_len,
             ISO_DEPTH,
-            packet_len * ISO_BATCH * ISO_DEPTH
+            slot_len * ISO_BATCH * ISO_DEPTH
         );
+        let fmt = self.active_format_ref();
+        let expected = if fmt.is_compressed() {
+            None
+        } else {
+            Some(fmt.max_frame_size as usize)
+        };
+        // 尝试硬中断路径：注册回调 + 预填流水线，零分配重入环
+        let ctx = Arc::new(IrqCaptureContext::new(
+            self.pool.clone(),
+            expected,
+            slot_len,
+        ));
+        let cb_ctx = ctx.clone();
+        let cb: IsoIrqCallback = Arc::new(move |data: &[u8], actuals: &[usize]| {
+            cb_ctx.handle_irq_batch(data, actuals, cb_ctx.slot_len);
+        });
+        match self.handle.set_iso_irq_callback(best.ep, Some(cb)) {
+            Ok(()) => {
+                let mut slots: Vec<Vec<u8>> = (0..ISO_DEPTH)
+                    .map(|_| vec![0u8; slot_len * ISO_BATCH])
+                    .collect();
+                let packet_lengths = vec![slot_len; ISO_BATCH];
+                let mut submitted = 0usize;
+                for slot in slots.iter_mut() {
+                    match self.handle.submit_endpoint_transfer(
+                        best.ep,
+                        TransferRequest::iso_in(slot.as_mut_slice(), &packet_lengths),
+                    ) {
+                        Ok(_) => submitted += 1,
+                        Err(USBError::TransferError(
+                            crab_usb::usb_if::err::TransferError::QueueFull,
+                        ))
+                        | Err(USBError::SlotLimitReached) => break,
+                        Err(err) => {
+                            error!("[UVC] irq submit failed err={err:?}");
+                            let _ = self.handle.set_iso_irq_callback(best.ep, None);
+                            let _ = self.handle.claim_interface(self.vs_iface_num, 0);
+                            return Err(err);
+                        }
+                    }
+                }
+                if submitted == 0 {
+                    error!("[UVC] irq stream: no slot submitted");
+                    let _ = self.handle.set_iso_irq_callback(best.ep, None);
+                    let _ = self.handle.claim_interface(self.vs_iface_num, 0);
+                    return Err(USBError::Other(anyhow!("no iso slot submitted")));
+                }
+                *self.irq_stream.lock() = Some(IrqStream {
+                    ctx,
+                    slots,
+                    endpoint: best.ep,
+                });
+                info!(
+                    "[UVC] start_streaming(irq): armed ep={:#x} depth={}",
+                    best.ep, submitted
+                );
+                return Ok(());
+            }
+            Err(USBError::NotSupported)
+            | Err(USBError::TransferError(crab_usb::usb_if::err::TransferError::NotSupported)) => {
+                // 后端不支持硬中断回调（非 DWC2），回退到任务侧轮询模型
+                warn!("[UVC] irq callback not supported, fallback to task worker");
+                let _ = self.handle.set_iso_irq_callback(best.ep, None);
+            }
+            Err(e) => {
+                error!(
+                    "[UVC] set_iso_irq_callback failed ep={:#x} err={e:?}",
+                    best.ep
+                );
+                let _ = self.handle.claim_interface(self.vs_iface_num, 0);
+                return Err(e);
+            }
+        }
+
+        // 回退：任务侧轮询模型（原实现）
+        let packet_len = slot_len;
         let cancel = Arc::new(AtomicBool::new(false));
         let worker = {
             let handle = self.handle.clone();
             let pool = self.pool.clone();
             let endpoint = best.ep;
             let cancel = cancel.clone();
-            let fmt = self.active_format_ref();
-            let expected = if fmt.is_compressed() {
-                None
-            } else {
-                Some(fmt.max_frame_size as usize)
-            };
             ax_task::spawn_with_name(
                 move || {
                     ax_task::future::block_on(async move {
@@ -536,11 +628,18 @@ impl<H: UvcHandle> UvcDevice<H> {
             task: worker,
             cancel,
         });
-        info!("[UVC] start_streaming: iso worker armed");
+        info!("[UVC] start_streaming: iso worker armed (fallback)");
         Ok(())
     }
 
     pub(crate) fn close_stream(&self) {
+        if let Some(irq) = self.irq_stream.lock().take() {
+            let _ = self.handle.set_iso_irq_callback(irq.endpoint, None);
+            let _ = self.handle.halt_iso_stream(irq.endpoint);
+            let _ = self.handle.claim_interface(self.vs_iface_num, 0);
+            drop(irq);
+            return;
+        }
         if let Some(worker) = self.stream.lock().take() {
             worker.cancel.store(true, Ordering::Release);
             worker.task.join();

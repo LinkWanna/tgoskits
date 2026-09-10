@@ -1,6 +1,7 @@
 //! UVC V4L2 camera driver — kernel-side glue.
 
 use crab_usb::{
+    IsoIrqCallback,
     err::{TransferError, USBError},
     usb_if::{
         endpoint::TransferRequest,
@@ -80,6 +81,19 @@ impl UvcHandle for UsbDeviceHandle {
             } => Ok(IsoPending::new(endpoint, request_id)),
             SubmittedTransferInner::Control { .. } => Err(USBError::InvalidParameter),
         }
+    }
+
+    fn set_iso_irq_callback(
+        &self,
+        endpoint: u8,
+        cb: Option<IsoIrqCallback>,
+    ) -> Result<(), USBError> {
+        self.lease_set_iso_irq_callback(endpoint, cb)
+            .map_err(map_usb_error)
+    }
+
+    fn halt_iso_stream(&self, endpoint: u8) -> Result<(), USBError> {
+        self.lease_halt_iso_stream(endpoint).map_err(map_usb_error)
     }
 }
 

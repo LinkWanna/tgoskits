@@ -2,7 +2,7 @@ use tock_registers::interfaces::{Readable, Writeable};
 
 use crate::backend::{
     kmod::dwc2::{
-        channel::Dwc2ChannelCompletions,
+        channel::{Dwc2ChannelCompletions, iso::IsoChannelState},
         reg::{
             DWC2_MAX_CHANNELS, DWC2_RUNTIME_GINTMSK, Dwc2Registers, GINTSTS_DISCONNINT,
             GINTSTS_HCHINT, GINTSTS_PRTINT, HCINT_CHHLTD, HPRT_CONN_DET, HPRT_ENA_CHG,
@@ -92,8 +92,16 @@ impl Dwc2EventHandler {
             };
             if hcint & HCINT_CHHLTD == 0 && channel_regs.is_enabled() {
                 if self.channel_completions.is_iso(channel) {
-                    // ISO 常驻通道：XFERCOMPL（IOC）时保持通道使能并继续周期
-                    // 会话，直接发布完成位，由任务侧结算本请求。
+                    let ptr = self.channel_completions.get_irq_iso_state(channel);
+                    if ptr != 0 {
+                        let state = unsafe { &mut *(ptr as *mut IsoChannelState) };
+                        if state.has_irq_callback() {
+                            state.poll_channel_in_irq(hcint);
+                            self.stats.record_channel_completion();
+                            count += 1;
+                            continue;
+                        }
+                    }
                     self.channel_completions.publish(channel, hcint);
                     self.stats.record_channel_completion();
                     count += 1;
@@ -102,6 +110,16 @@ impl Dwc2EventHandler {
                     channel_regs.disable();
                 }
                 continue;
+            }
+            let ptr = self.channel_completions.get_irq_iso_state(channel);
+            if ptr != 0 {
+                let state = unsafe { &mut *(ptr as *mut IsoChannelState) };
+                if state.has_irq_callback() {
+                    state.poll_channel_in_irq(hcint);
+                    self.stats.record_channel_completion();
+                    count += 1;
+                    continue;
+                }
             }
             self.channel_completions.publish(channel, hcint);
             self.stats.record_channel_completion();

@@ -9,5 +9,5 @@ mod buf;
 mod pool;
 
 pub use allocator::{VbMemOps, VirtualAllocator};
-pub use buf::{BufferState, MemPlane, Timestamp, VbBuffer};
+pub use buf::{ActiveFrame, BufferState, MemPlane, Timestamp, VbBuffer};
 pub use pool::{FrameGuard, VbPool, VbPoolLease};

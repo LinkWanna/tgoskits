@@ -327,6 +327,16 @@ impl Dwc2DmaBuffer {
         self.len
     }
 
+    pub(crate) fn request_buffer(&self) -> Option<(NonNull<u8>, usize)> {
+        self.request_buffer
+    }
+
+    pub(crate) fn prepare_for_reuse(&self) {
+        if let Some(coherent) = &self.coherent {
+            coherent.prepare_for_device(0..self.len);
+        }
+    }
+
     pub(crate) fn dma_addr(&self) -> u64 {
         self.coherent
             .as_ref()

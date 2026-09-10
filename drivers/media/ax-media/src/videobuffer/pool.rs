@@ -10,12 +10,12 @@
 
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 
-use ax_sync::Mutex;
+use ax_sync::SpinLock;
 use axpoll::{IoEvents, PollSet};
 
 use super::{
     allocator::VbMemOps,
-    buf::{ActiveFrame, BufferState, Timestamp, VbBuffer},
+    buf::{ActiveFrame, BufferState, MemPlane, Timestamp, VbBuffer},
 };
 use crate::V4l2Error;
 
@@ -34,7 +34,7 @@ pub(crate) struct VbPoolInner {
 ///
 /// `ready_queue` 存放 `Ready`/`Active` 缓冲索引，`done_queue` 存放 `Done`/`Error`。
 pub struct VbPool<M: VbMemOps> {
-    pub(crate) state: Mutex<VbPoolInner>,
+    pub(crate) state: SpinLock<VbPoolInner>,
     pub(crate) poll_set: Arc<PollSet>,
     allocator: M,
     min_buffers: u32,
@@ -44,7 +44,7 @@ pub struct VbPool<M: VbMemOps> {
 impl<M: VbMemOps> VbPool<M> {
     pub fn new(alloc: M, min_buffers: u32, max_buffers: u32) -> Self {
         Self {
-            state: Mutex::new(VbPoolInner {
+            state: SpinLock::new(VbPoolInner {
                 buffers: Vec::new(),
                 ready_queue: VecDeque::new(),
                 done_queue: VecDeque::new(),
@@ -61,28 +61,33 @@ impl<M: VbMemOps> VbPool<M> {
 
     // ── mmap ───────────────────────────────────────────────────────
     pub fn mmap(&self, offset: u64, length: u64) -> Option<(Vec<usize>, usize)> {
-        let inner = self.state.lock();
-        for vb in inner.buffers.iter() {
-            let plane = vb.planes.first()?;
-            let base = plane.offset as u64;
-            let end = base + plane.length as u64;
-            if offset >= base && offset < end {
-                if offset + length > end {
-                    return None;
+        let (plane_copy, offset_in_plane) = {
+            let inner = self.state.lock_irqsave();
+            let mut found = None;
+            for vb in inner.buffers.iter() {
+                let plane = vb.planes.first()?;
+                let base = plane.offset as u64;
+                let end = base + plane.length as u64;
+                if offset >= base && offset < end {
+                    if offset + length > end {
+                        break;
+                    }
+                    let sub = (offset - base) as usize;
+                    found = Some((*plane, sub));
+                    break;
                 }
-                let sub = (offset - base) as usize;
-                let page = 4096usize;
-                let first_page = sub / page;
-                let n_pages = (sub % page + length as usize).div_ceil(page);
-                let all = self.allocator.mmap(plane);
-                let addrs = all
-                    .get(first_page..first_page + n_pages)
-                    .unwrap_or_default()
-                    .to_vec();
-                return Some((addrs, length as usize));
             }
-        }
-        None
+            found?
+        };
+        let page = 4096usize;
+        let first_page = offset_in_plane / page;
+        let n_pages = (offset_in_plane % page + length as usize).div_ceil(page);
+        let all = self.allocator.mmap(&plane_copy);
+        let addrs = all
+            .get(first_page..first_page + n_pages)
+            .unwrap_or_default()
+            .to_vec();
+        Some((addrs, length as usize))
     }
 
     // ── poll ───────────────────────────────────────────────────────
@@ -91,20 +96,20 @@ impl<M: VbMemOps> VbPool<M> {
     }
 
     pub fn is_readable(&self) -> bool {
-        !self.state.lock().done_queue.is_empty()
+        !self.state.lock_irqsave().done_queue.is_empty()
     }
 
     pub fn is_error(&self) -> bool {
-        self.state.lock().error
+        self.state.lock_irqsave().error
     }
 
     pub fn is_streaming(&self) -> bool {
-        self.state.lock().streaming
+        self.state.lock_irqsave().streaming
     }
 
     /// 置错误并回收孤儿 `Active && driver_owned` 为 `Error` 入 `done_queue`。
     pub fn set_error(&self) {
-        let mut inner = self.state.lock();
+        let mut inner = self.state.lock_irqsave();
         inner.error = true;
         let orphan: Vec<u32> = inner
             .buffers
@@ -140,8 +145,9 @@ impl<M: VbMemOps> VbPool<M> {
     }
 
     // ── 驱动侧：VbPoolLease ─────────────────────────────────────────────
-    pub(crate) fn acquire_frame(&self) -> Option<ActiveFrame> {
-        let mut inner = self.state.lock();
+    /// 可在硬中断直接调用，避免 UVC 丢帧。
+    pub fn acquire_frame(&self) -> Option<ActiveFrame> {
+        let mut inner = self.state.lock_irqsave();
         for (idx, vb) in inner.buffers.iter_mut().enumerate() {
             if vb.state == BufferState::Ready {
                 let plane = vb.planes.first()?;
@@ -166,16 +172,16 @@ impl<M: VbMemOps> VbPool<M> {
         VbPoolLease::new(Arc::clone(self), frame)
     }
 
-    fn commit_frame(&self, frame: ActiveFrame, bytesused: u32) {
+    pub fn commit_frame(&self, frame: ActiveFrame, bytesused: u32) {
         self.commit_inner(frame.buffer_index, bytesused, BufferState::Done)
     }
 
-    fn abort_frame(&self, frame: ActiveFrame) {
+    pub fn abort_frame(&self, frame: ActiveFrame) {
         self.commit_inner(frame.buffer_index, 0, BufferState::Error)
     }
 
     fn commit_inner(&self, index: u32, bytesused: u32, state: BufferState) {
-        let mut guard = self.state.lock();
+        let mut guard = self.state.lock_irqsave();
         let inner = &mut *guard;
         // 内部路径保证：index 来自已 `Active` 的租约，state 仅为 Done/Error
         let vb = &mut inner.buffers[index as usize];
@@ -193,22 +199,28 @@ impl<M: VbMemOps> VbPool<M> {
 /// Ioctl 委托——`reqbufs/qbuf/dqbuf/streamon/streamoff` 直接调用的池操作。
 impl<M: VbMemOps> VbPool<M> {
     pub fn reqbufs(&self, count: u32, plane_sizes: &[u32]) -> Result<(), V4l2Error> {
-        let mut inner = self.state.lock();
-        if inner.streaming {
-            log::warn!(
-                "[vb2] reqbufs Busy: streaming=true count={} buffers={}",
-                count,
-                inner.buffers.len()
-            );
-            return Err(V4l2Error::Busy);
-        }
-        if count == 0 {
-            for vb in inner.buffers.drain(..) {
-                self.allocator.release(&vb.planes);
+        let old_planes: Vec<Vec<MemPlane>> = {
+            let mut inner = self.state.lock_irqsave();
+            if inner.streaming {
+                log::warn!(
+                    "[vb2] reqbufs Busy: streaming=true count={} buffers={}",
+                    count,
+                    inner.buffers.len()
+                );
+                return Err(V4l2Error::Busy);
             }
+            let old: Vec<Vec<MemPlane>> = inner.buffers.drain(..).map(|vb| vb.planes).collect();
             inner.ready_queue.clear();
             inner.done_queue.clear();
             inner.sequence = 0;
+            old
+        };
+        for planes in &old_planes {
+            self.allocator.release(planes);
+        }
+        // old already cleared; release already done via old_planes
+        // Need to handle count==0 early (buffers already drained)
+        if count == 0 {
             return Ok(());
         }
         if plane_sizes.len() != 1 {
@@ -234,9 +246,9 @@ impl<M: VbMemOps> VbPool<M> {
                 }
             }
         }
-        for vb in inner.buffers.drain(..) {
-            self.allocator.release(&vb.planes);
-        }
+        let mut inner = self.state.lock_irqsave();
+        // reqbufs(0) race: if another reqbufs cleared again, we just replace
+        // but we already released old_planes; now just install tmp
         inner.ready_queue.clear();
         inner.done_queue.clear();
         inner.sequence = 0;
@@ -245,7 +257,7 @@ impl<M: VbMemOps> VbPool<M> {
     }
 
     pub fn qbuf(&self, index: u32) -> Result<(), V4l2Error> {
-        let mut inner = self.state.lock();
+        let mut inner = self.state.lock_irqsave();
         if inner.error {
             return Err(V4l2Error::Io);
         }
@@ -262,7 +274,7 @@ impl<M: VbMemOps> VbPool<M> {
     }
 
     pub fn dqbuf(&self) -> Result<u32, V4l2Error> {
-        let mut inner = self.state.lock();
+        let mut inner = self.state.lock_irqsave();
         let idx = inner.done_queue.pop_front().ok_or(V4l2Error::Busy)?;
         let vb = &mut inner.buffers[idx as usize];
         if vb.state != BufferState::Done && vb.state != BufferState::Error {
@@ -276,7 +288,7 @@ impl<M: VbMemOps> VbPool<M> {
     }
 
     pub fn prepare_buf(&self, index: u32) -> Result<(), V4l2Error> {
-        let mut inner = self.state.lock();
+        let mut inner = self.state.lock_irqsave();
         if inner.error {
             return Err(V4l2Error::Io);
         }
@@ -291,7 +303,7 @@ impl<M: VbMemOps> VbPool<M> {
     }
 
     pub fn streamon(&self) -> Result<(), V4l2Error> {
-        let mut inner = self.state.lock();
+        let mut inner = self.state.lock_irqsave();
         if inner.streaming {
             return Err(V4l2Error::Busy);
         }
@@ -303,7 +315,7 @@ impl<M: VbMemOps> VbPool<M> {
     }
 
     pub fn streamoff(&self) {
-        let mut inner = self.state.lock();
+        let mut inner = self.state.lock_irqsave();
         for vb in &mut inner.buffers {
             if vb.state != BufferState::Free {
                 vb.state = BufferState::Free;
@@ -318,11 +330,15 @@ impl<M: VbMemOps> VbPool<M> {
     }
 
     pub fn buffer_snapshot(&self, index: u32) -> Option<VbBuffer> {
-        self.state.lock().buffers.get(index as usize).cloned()
+        self.state
+            .lock_irqsave()
+            .buffers
+            .get(index as usize)
+            .cloned()
     }
 
     pub fn num_buffers(&self) -> u32 {
-        self.state.lock().buffers.len() as u32
+        self.state.lock_irqsave().buffers.len() as u32
     }
 }
 
