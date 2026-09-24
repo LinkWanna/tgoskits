@@ -465,13 +465,16 @@ impl UsbDeviceFile {
         }
 
         let submitted = self.drain_submitted_urbs_for_interface(interface);
+        if let Err(err) = self.with_live_lease(|lease| lease.claim_interface(interface, alternate)) {
+            self.submitted_urbs.lock().extend(submitted);
+            return Err(err);
+        }
+        self.claimed_interfaces.lock().insert(interface, alternate);
         let remaining = cleanup_submitted_urbs(submitted, Some(USBFS_URB_CANCEL_TIMEOUT));
         if !remaining.is_empty() {
             self.submitted_urbs.lock().extend(remaining);
             return Err(StarryError::ResourceBusy);
         }
-        self.with_live_lease(|lease| lease.claim_interface(interface, alternate))?;
-        self.claimed_interfaces.lock().insert(interface, alternate);
         Ok(0)
     }
 
@@ -1707,10 +1710,12 @@ fn snapshot_endpoint_interface(
                 interface = Some(snapshot.descriptor_blob[cursor + 2]);
                 alternate = snapshot.descriptor_blob[cursor + 3];
             }
-            0x05 if length >= 7 && snapshot.descriptor_blob[cursor + 2] == endpoint => {
-                if alternate == 0 {
-                    return interface;
-                }
+            0x05
+                if length >= 7
+                    && snapshot.descriptor_blob[cursor + 2] == endpoint
+                    && alternate == 0 =>
+            {
+                return interface;
             }
             _ => {}
         }

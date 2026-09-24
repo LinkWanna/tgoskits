@@ -433,13 +433,12 @@ impl UsbDeviceLease {
         data: &mut [u8],
     ) -> StarryResult<usize> {
         self.ensure_current()?;
+        let setup = control_setup_from_raw(b_request_type, b_request, w_value, w_index);
         self.manager.live_control_transfer(
             self.stable_id,
             self.session_id,
             b_request_type,
-            b_request,
-            w_value,
-            w_index,
+            setup,
             data,
         )
     }
@@ -1181,13 +1180,10 @@ impl UsbFsManager {
         stable_id: UsbStableId,
         session_id: u64,
         b_request_type: u8,
-        b_request: u8,
-        w_value: u16,
-        w_index: u16,
+        setup: ControlSetup,
         data: &mut [u8],
     ) -> StarryResult<usize> {
         self.live_ensure_configured(stable_id)?;
-        let setup = control_setup_from_raw(b_request_type, b_request, w_value, w_index);
         let live_device = self.live_device_by_id(stable_id)?;
         let interfaces = live_device.interfaces.lock();
         check_control_access(&interfaces, session_id, &setup)?;
@@ -1442,6 +1438,12 @@ impl UsbFsManager {
         arg: usize,
     ) -> crate::StarryResult<usize> {
         let ctrl = read_usbdevfs_ctrltransfer(current, arg)?;
+        let setup = control_setup_from_raw(
+            ctrl.b_request_type,
+            ctrl.b_request,
+            ctrl.w_value,
+            ctrl.w_index,
+        );
         match direction_from_raw(ctrl.b_request_type) {
             Direction::In => {
                 let mut data = vec![0; ctrl.w_length as usize];
@@ -1449,9 +1451,7 @@ impl UsbFsManager {
                     stable_id,
                     session_id,
                     ctrl.b_request_type,
-                    ctrl.b_request,
-                    ctrl.w_value,
-                    ctrl.w_index,
+                    setup,
                     &mut data,
                 )?;
                 vm_write_slice(current, ctrl.data, &data[..actual])?;
@@ -1463,9 +1463,7 @@ impl UsbFsManager {
                     stable_id,
                     session_id,
                     ctrl.b_request_type,
-                    ctrl.b_request,
-                    ctrl.w_value,
-                    ctrl.w_index,
+                    setup,
                     &mut data,
                 )
             }
