@@ -9,24 +9,23 @@ use bitflags::bitflags;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TunerType(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl TunerType {
-    pub const Radio: Self = Self(1);
-    pub const AnalogTv: Self = Self(2);
-    pub const DigitalTv: Self = Self(3);
-    pub const Sdr: Self = Self(4);
-    pub const Rf: Self = Self(5);
+    pub const RADIO: Self = Self(1);
+    pub const ANALOG_TV: Self = Self(2);
+    pub const DIGITAL_TV: Self = Self(3);
+    pub const SDR: Self = Self(4);
+    pub const RF: Self = Self(5);
 }
 
 impl TunerType {
     /// 尝试将原始 `u32` 转换为 [`TunerType`]。
     pub fn try_from_u32(v: u32) -> Option<Self> {
         Some(match v {
-            1 => Self::Radio,
-            2 => Self::AnalogTv,
-            3 => Self::DigitalTv,
-            4 => Self::Sdr,
-            5 => Self::Rf,
+            1 => Self::RADIO,
+            2 => Self::ANALOG_TV,
+            3 => Self::DIGITAL_TV,
+            4 => Self::SDR,
+            5 => Self::RF,
             _ => return None,
         })
     }
@@ -86,7 +85,6 @@ bitflags! {
 }
 
 /// 音频模式值 — `V4L2_TUNER_MODE_*`（值有重叠，仅作常量说明用）。
-#[allow(non_upper_case_globals)]
 pub mod tuner_mode {
     pub const MONO: u32 = 0x0000;
     pub const STEREO: u32 = 0x0001;

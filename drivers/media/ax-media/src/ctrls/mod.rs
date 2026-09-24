@@ -648,7 +648,7 @@ impl CtrlHandler {
     }
 
     pub fn subscribe_event(&self, fh: &mut V4l2Fh, sub: &EventSubscription) -> Result<()> {
-        if sub.ty != EventType::Ctrl {
+        if sub.ty != EventType::CTRL {
             return Err(V4l2Error::InvalidArgument);
         }
         let ctrl = self.find(sub.id).ok_or(V4l2Error::InvalidArgument)?;
@@ -1177,7 +1177,7 @@ mod tests {
 
     fn ctrl_sub(id: u32, flags: EventSubFlags) -> EventSubscription {
         EventSubscription {
-            ty: EventType::Ctrl,
+            ty: EventType::CTRL,
             id,
             flags,
             reserved: [0; 5],
@@ -1206,7 +1206,7 @@ mod tests {
         assert_eq!(fh.pending(), 1, "SEND_INITIAL queues one initial event");
 
         let out = fh.dequeue().unwrap();
-        assert_eq!(out.ty, EventType::Ctrl.0);
+        assert_eq!(out.ty, EventType::CTRL.0);
         assert_eq!(out.id, BRIGHTNESS);
         assert_eq!(out.reserved, [0; 8], "reserved must be zeroed");
         let payload = read_ctrl(&out);
@@ -1235,7 +1235,7 @@ mod tests {
             handler.subscribe_event(
                 &mut fh,
                 &EventSubscription {
-                    ty: EventType::Eos,
+                    ty: EventType::EOS,
                     id: BRIGHTNESS,
                     flags: EventSubFlags::empty(),
                     reserved: [0; 5],

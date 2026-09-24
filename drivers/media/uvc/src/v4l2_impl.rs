@@ -112,7 +112,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
     }
 
     fn enum_fmt(&self, f: &mut Fmtdesc) -> ax_media::Result<()> {
-        if f.ty != BufType::VideoCapture {
+        if f.ty != BufType::VIDEO_CAPTURE {
             return Err(V4l2Error::InvalidArgument);
         }
         let mut seen = Vec::new();
@@ -158,7 +158,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
         let format = matching
             .get(f.index as usize)
             .ok_or(V4l2Error::InvalidArgument)?;
-        f.ty = FrameSizeType::Discrete;
+        f.ty = FrameSizeType::DISCRETE;
         f.size.discrete.width = format.width as u32;
         f.size.discrete.height = format.height as u32;
         f.reserved = [0; 2];
@@ -196,7 +196,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
             let min_f = Fract::from_interval(*min);
             let max_f = Fract::from_interval(*max);
             let step_f = Fract::from_interval(*step);
-            f.ty = FrameIntervalType::Stepwise;
+            f.ty = FrameIntervalType::STEPWISE;
             f.interval.stepwise.min = min_f;
             f.interval.stepwise.max = max_f;
             f.interval.stepwise.step = step_f;
@@ -230,36 +230,36 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
             .get(f.index as usize)
             .ok_or(V4l2Error::InvalidArgument)?;
         let fract = Fract::from_interval(*interval);
-        f.ty = FrameIntervalType::Discrete;
+        f.ty = FrameIntervalType::DISCRETE;
         f.interval.discrete = fract;
         f.reserved = [0; 2];
         Ok(())
     }
 
     fn g_fmt(&self, f: &mut Format) -> ax_media::Result<()> {
-        if f.ty != BufType::VideoCapture {
+        if f.ty != BufType::VIDEO_CAPTURE {
             return Err(V4l2Error::InvalidArgument);
         }
         let current = self.active_format_ref();
 
-        f.ty = BufType::VideoCapture;
+        f.ty = BufType::VIDEO_CAPTURE;
         f.fmt.pix.width = current.width as u32;
         f.fmt.pix.height = current.height as u32;
         f.fmt.pix.pixelformat = current.pixelformat();
-        f.fmt.pix.field = Field::NoField;
+        f.fmt.pix.field = Field::NO_FIELD;
         f.fmt.pix.bytesperline = current.bytes_per_line() as u32;
         f.fmt.pix.sizeimage = current.max_frame_size;
         f.fmt.pix.colorspace = current.colorspace();
         f.fmt.pix.priv_data = 0;
         f.fmt.pix.flags = 0;
         f.fmt.pix.ycbcr_enc = colorspace::YcbcrEncoding::Default as u32;
-        f.fmt.pix.quantization = colorspace::Quantization::FullRange;
-        f.fmt.pix.xfer_func = colorspace::XferFunc::Default;
+        f.fmt.pix.quantization = colorspace::Quantization::FULL_RANGE;
+        f.fmt.pix.xfer_func = colorspace::XferFunc::DEFAULT;
         Ok(())
     }
 
     fn s_fmt(&mut self, f: &mut Format) -> ax_media::Result<()> {
-        if f.ty != BufType::VideoCapture {
+        if f.ty != BufType::VIDEO_CAPTURE {
             return Err(V4l2Error::InvalidArgument);
         }
         if self.pool.num_buffers() != 0 {
@@ -301,20 +301,20 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
         f.fmt.pix.width = current.width as u32;
         f.fmt.pix.height = current.height as u32;
         f.fmt.pix.pixelformat = current.pixelformat();
-        f.fmt.pix.field = Field::NoField;
+        f.fmt.pix.field = Field::NO_FIELD;
         f.fmt.pix.bytesperline = current.bytes_per_line() as u32;
         f.fmt.pix.sizeimage = current.max_frame_size;
         f.fmt.pix.colorspace = current.colorspace();
         f.fmt.pix.priv_data = 0;
         f.fmt.pix.flags = 0;
         f.fmt.pix.ycbcr_enc = colorspace::YcbcrEncoding::Default as u32;
-        f.fmt.pix.quantization = colorspace::Quantization::FullRange;
-        f.fmt.pix.xfer_func = colorspace::XferFunc::Default;
+        f.fmt.pix.quantization = colorspace::Quantization::FULL_RANGE;
+        f.fmt.pix.xfer_func = colorspace::XferFunc::DEFAULT;
         Ok(())
     }
 
     fn try_fmt(&self, f: &mut Format) -> ax_media::Result<()> {
-        if f.ty != BufType::VideoCapture {
+        if f.ty != BufType::VIDEO_CAPTURE {
             return Err(V4l2Error::InvalidArgument);
         }
         // SAFETY: `f.ty` is VideoCapture, so `pix` is active.
@@ -357,29 +357,29 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
                 pix.height.clamp(120, 1080),
                 pix.width * pix.height * 2,
                 0,
-                colorspace::Colorspace::Srgb,
+                colorspace::Colorspace::SRGB,
             ),
         };
         f.fmt.pix.width = w;
         f.fmt.pix.height = h;
         f.fmt.pix.pixelformat = pixelformat;
-        f.fmt.pix.field = Field::NoField;
+        f.fmt.pix.field = Field::NO_FIELD;
         f.fmt.pix.bytesperline = bytesperline;
         f.fmt.pix.sizeimage = sizeimage;
         f.fmt.pix.colorspace = colorspace;
         f.fmt.pix.priv_data = 0;
         f.fmt.pix.flags = 0;
         f.fmt.pix.ycbcr_enc = colorspace::YcbcrEncoding::Default as u32;
-        f.fmt.pix.quantization = colorspace::Quantization::FullRange;
-        f.fmt.pix.xfer_func = colorspace::XferFunc::Default;
+        f.fmt.pix.quantization = colorspace::Quantization::FULL_RANGE;
+        f.fmt.pix.xfer_func = colorspace::XferFunc::DEFAULT;
         Ok(())
     }
 
     fn reqbufs(&mut self, req: &mut buffer::Requestbuffers) -> ax_media::Result<()> {
-        if req.ty != BufType::VideoCapture {
+        if req.ty != BufType::VIDEO_CAPTURE {
             return Err(V4l2Error::InvalidArgument);
         }
-        if req.memory != Memory::Mmap {
+        if req.memory != Memory::MMAP {
             return Err(V4l2Error::InvalidArgument);
         }
         let sizeimage = {
@@ -404,7 +404,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
     }
 
     fn querybuf(&self, buf: &mut buffer::Buffer) -> ax_media::Result<()> {
-        if buf.ty != BufType::VideoCapture {
+        if buf.ty != BufType::VIDEO_CAPTURE {
             return Err(V4l2Error::InvalidArgument);
         }
         let q = &self.pool;
@@ -413,11 +413,11 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
             .ok_or(V4l2Error::InvalidArgument)?;
 
         let plane = vb.planes.first().ok_or(V4l2Error::InvalidArgument)?;
-        buf.ty = BufType::VideoCapture;
+        buf.ty = BufType::VIDEO_CAPTURE;
         buf.length = plane.length;
         buf.m.offset = plane.offset as u32;
-        buf.memory = Memory::Mmap;
-        buf.field = Field::NoField;
+        buf.memory = Memory::MMAP;
+        buf.field = Field::NO_FIELD;
         buf.timecode = Timecode::default();
         buf.reserved2 = 0;
         buf.request_fd = 0;
@@ -448,7 +448,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
     }
 
     fn qbuf(&mut self, buf: &mut buffer::Buffer) -> ax_media::Result<()> {
-        if buf.ty != BufType::VideoCapture || buf.memory != Memory::Mmap {
+        if buf.ty != BufType::VIDEO_CAPTURE || buf.memory != Memory::MMAP {
             return Err(V4l2Error::InvalidArgument);
         }
         self.pool.qbuf(buf.index)?;
@@ -457,7 +457,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
     }
 
     fn dqbuf(&mut self, buf: &mut buffer::Buffer) -> ax_media::Result<()> {
-        if buf.ty != BufType::VideoCapture {
+        if buf.ty != BufType::VIDEO_CAPTURE {
             return Err(V4l2Error::InvalidArgument);
         }
         let q = &self.pool;
@@ -478,17 +478,17 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
         buf.flags = buffer::BufFlags::KEYFRAME | timestamp.flags();
         buf.bytesused = bytesused;
         buf.timestamp = timestamp.timeval();
-        buf.field = Field::NoField;
+        buf.field = Field::NO_FIELD;
         buf.sequence = sequence;
-        buf.memory = Memory::Mmap;
-        buf.ty = BufType::VideoCapture;
+        buf.memory = Memory::MMAP;
+        buf.ty = BufType::VIDEO_CAPTURE;
         buf.length = vb.planes.first().map(|p| p.length).unwrap_or(0);
         buf.m.offset = vb.planes.first().map(|p| p.offset as u32).unwrap_or(0);
         Ok(())
     }
 
     fn streamon(&mut self, ty: BufType) -> ax_media::Result<()> {
-        if ty != BufType::VideoCapture {
+        if ty != BufType::VIDEO_CAPTURE {
             return Err(V4l2Error::InvalidArgument);
         }
         self.pool.streamon()?;
@@ -501,7 +501,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
     }
 
     fn streamoff(&mut self, ty: BufType) -> ax_media::Result<()> {
-        if ty != BufType::VideoCapture {
+        if ty != BufType::VIDEO_CAPTURE {
             return Err(V4l2Error::InvalidArgument);
         }
         self.close_stream();
@@ -510,7 +510,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
     }
 
     fn g_parm(&self, p: &mut StreamParm) -> ax_media::Result<()> {
-        if p.ty != BufType::VideoCapture {
+        if p.ty != BufType::VIDEO_CAPTURE {
             return Err(V4l2Error::InvalidArgument);
         }
         p.parm.raw_data = [0; 200];
@@ -528,7 +528,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
     }
 
     fn s_parm(&mut self, p: &mut StreamParm) -> ax_media::Result<()> {
-        if p.ty != BufType::VideoCapture {
+        if p.ty != BufType::VIDEO_CAPTURE {
             return Err(V4l2Error::InvalidArgument);
         }
         // 匹配 Linux uvc 驱动行为，若流正在运行，则拒绝 s_parm
@@ -575,7 +575,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
         let name = b"Camera\0";
         input.name = [0; 32];
         input.name[..name.len()].copy_from_slice(name);
-        input.ty = ax_media::interface::inout::InputType::Camera;
+        input.ty = ax_media::interface::inout::InputType::CAMERA;
         input.audioset = 0;
         input.tuner = 0;
         input.std = 0;

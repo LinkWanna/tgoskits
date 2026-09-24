@@ -140,9 +140,9 @@ impl VideoFormat {
     /// V4L2 colorspace.
     pub(crate) fn colorspace(&self) -> colorspace::Colorspace {
         if self.is_compressed() {
-            colorspace::Colorspace::Jpeg
+            colorspace::Colorspace::JPEG
         } else {
-            colorspace::Colorspace::Srgb
+            colorspace::Colorspace::SRGB
         }
     }
 

@@ -43,12 +43,11 @@ pub struct EncIndex {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncCmd(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl EncCmd {
-    pub const Start: Self = Self(0);
-    pub const Stop: Self = Self(1);
-    pub const Pause: Self = Self(2);
-    pub const Resume: Self = Self(3);
+    pub const START: Self = Self(0);
+    pub const STOP: Self = Self(1);
+    pub const PAUSE: Self = Self(2);
+    pub const RESUME: Self = Self(3);
 }
 
 bitflags! {
@@ -76,13 +75,12 @@ pub struct EncoderCmd {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecCmd(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl DecCmd {
-    pub const Start: Self = Self(0);
-    pub const Stop: Self = Self(1);
-    pub const Pause: Self = Self(2);
-    pub const Resume: Self = Self(3);
-    pub const Flush: Self = Self(4);
+    pub const START: Self = Self(0);
+    pub const STOP: Self = Self(1);
+    pub const PAUSE: Self = Self(2);
+    pub const RESUME: Self = Self(3);
+    pub const FLUSH: Self = Self(4);
 }
 
 bitflags! {

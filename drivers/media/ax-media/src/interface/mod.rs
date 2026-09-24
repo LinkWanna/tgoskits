@@ -111,18 +111,17 @@ impl Fract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Field(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl Field {
-    pub const Any: Self = Self(0); // 驱动可在无、顶场、底场、隔行中自行选择
-    pub const NoField: Self = Self(1); // 该设备没有场
-    pub const Top: Self = Self(2); // 仅顶场
-    pub const Bottom: Self = Self(3); // 仅底场
-    pub const Interlaced: Self = Self(4); // 两场隔行
-    pub const SeqTb: Self = Self(5); // 两场顺序，先顶后底
-    pub const SeqBt: Self = Self(6); // 两场顺序，先底后顶
-    pub const Alternate: Self = Self(7); // 两场交替放入独立的缓冲区
-    pub const InterlacedTb: Self = Self(8); // 两场隔行，顶场在前，先传输顶场
-    pub const InterlacedBt: Self = Self(9); // 两场隔行，顶场在前，先传输底场
+    pub const ANY: Self = Self(0); // 驱动可在无、顶场、底场、隔行中自行选择
+    pub const NO_FIELD: Self = Self(1); // 该设备没有场
+    pub const TOP: Self = Self(2); // 仅顶场
+    pub const BOTTOM: Self = Self(3); // 仅底场
+    pub const INTERLACED: Self = Self(4); // 两场隔行
+    pub const SEQ_TB: Self = Self(5); // 两场顺序，先顶后底
+    pub const SEQ_BT: Self = Self(6); // 两场顺序，先底后顶
+    pub const ALTERNATE: Self = Self(7); // 两场交替放入独立的缓冲区
+    pub const INTERLACED_TB: Self = Self(8); // 两场隔行，顶场在前，先传输顶场
+    pub const INTERLACED_BT: Self = Self(9); // 两场隔行，顶场在前，先传输底场
 }
 
 impl Field {
@@ -130,12 +129,12 @@ impl Field {
     pub const fn has_top(self) -> bool {
         matches!(
             self,
-            Self::Top
-                | Self::Interlaced
-                | Self::InterlacedTb
-                | Self::InterlacedBt
-                | Self::SeqTb
-                | Self::SeqBt
+            Self::TOP
+                | Self::INTERLACED
+                | Self::INTERLACED_TB
+                | Self::INTERLACED_BT
+                | Self::SEQ_TB
+                | Self::SEQ_BT
         )
     }
 
@@ -143,12 +142,12 @@ impl Field {
     pub const fn has_bottom(self) -> bool {
         matches!(
             self,
-            Self::Bottom
-                | Self::Interlaced
-                | Self::InterlacedTb
-                | Self::InterlacedBt
-                | Self::SeqTb
-                | Self::SeqBt
+            Self::BOTTOM
+                | Self::INTERLACED
+                | Self::INTERLACED_TB
+                | Self::INTERLACED_BT
+                | Self::SEQ_TB
+                | Self::SEQ_BT
         )
     }
 
@@ -156,13 +155,13 @@ impl Field {
     pub const fn is_interlaced(self) -> bool {
         matches!(
             self,
-            Self::Interlaced | Self::InterlacedTb | Self::InterlacedBt
+            Self::INTERLACED | Self::INTERLACED_TB | Self::INTERLACED_BT
         )
     }
 
     /// 若该 Field 是顺序则返回 true。
     pub const fn is_sequential(self) -> bool {
-        matches!(self, Self::SeqTb | Self::SeqBt)
+        matches!(self, Self::SEQ_TB | Self::SEQ_BT)
     }
 }
 
@@ -171,61 +170,60 @@ impl Field {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufType(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl BufType {
-    pub const VideoCapture: Self = Self(1);
-    pub const VideoOutput: Self = Self(2);
-    pub const VideoOverlay: Self = Self(3);
-    pub const VbiCapture: Self = Self(4);
-    pub const VbiOutput: Self = Self(5);
-    pub const SlicedVbiCapture: Self = Self(6);
-    pub const SlicedVbiOutput: Self = Self(7);
-    pub const VideoOutputOverlay: Self = Self(8);
-    pub const VideoCaptureMplane: Self = Self(9);
-    pub const VideoOutputMplane: Self = Self(10);
-    pub const SdrCapture: Self = Self(11);
-    pub const SdrOutput: Self = Self(12);
-    pub const MetaCapture: Self = Self(13);
-    pub const MetaOutput: Self = Self(14);
-    pub const Private: Self = Self(0x80);
+    pub const VIDEO_CAPTURE: Self = Self(1);
+    pub const VIDEO_OUTPUT: Self = Self(2);
+    pub const VIDEO_OVERLAY: Self = Self(3);
+    pub const VBI_CAPTURE: Self = Self(4);
+    pub const VBI_OUTPUT: Self = Self(5);
+    pub const SLICED_VBI_CAPTURE: Self = Self(6);
+    pub const SLICED_VBI_OUTPUT: Self = Self(7);
+    pub const VIDEO_OUTPUT_OVERLAY: Self = Self(8);
+    pub const VIDEO_CAPTURE_MPLANE: Self = Self(9);
+    pub const VIDEO_OUTPUT_MPLANE: Self = Self(10);
+    pub const SDR_CAPTURE: Self = Self(11);
+    pub const SDR_OUTPUT: Self = Self(12);
+    pub const META_CAPTURE: Self = Self(13);
+    pub const META_OUTPUT: Self = Self(14);
+    pub const PRIVATE: Self = Self(0x80);
 }
 
 impl BufType {
     pub const fn is_valid(self) -> bool {
         matches!(
             self,
-            Self::VideoCapture
-                | Self::VideoOutput
-                | Self::VideoOverlay
-                | Self::VbiCapture
-                | Self::VbiOutput
-                | Self::SlicedVbiCapture
-                | Self::SlicedVbiOutput
-                | Self::VideoOutputOverlay
-                | Self::VideoCaptureMplane
-                | Self::VideoOutputMplane
-                | Self::SdrCapture
-                | Self::SdrOutput
-                | Self::MetaCapture
-                | Self::MetaOutput
-                | Self::Private
+            Self::VIDEO_CAPTURE
+                | Self::VIDEO_OUTPUT
+                | Self::VIDEO_OVERLAY
+                | Self::VBI_CAPTURE
+                | Self::VBI_OUTPUT
+                | Self::SLICED_VBI_CAPTURE
+                | Self::SLICED_VBI_OUTPUT
+                | Self::VIDEO_OUTPUT_OVERLAY
+                | Self::VIDEO_CAPTURE_MPLANE
+                | Self::VIDEO_OUTPUT_MPLANE
+                | Self::SDR_CAPTURE
+                | Self::SDR_OUTPUT
+                | Self::META_CAPTURE
+                | Self::META_OUTPUT
+                | Self::PRIVATE
         )
     }
 
     pub const fn is_multiplanar(self) -> bool {
-        matches!(self, Self::VideoCaptureMplane | Self::VideoOutputMplane)
+        matches!(self, Self::VIDEO_CAPTURE_MPLANE | Self::VIDEO_OUTPUT_MPLANE)
     }
 
     pub const fn is_output(self) -> bool {
         matches!(
             self,
-            Self::VideoOutput
-                | Self::VideoOutputMplane
-                | Self::VideoOutputOverlay
-                | Self::VbiOutput
-                | Self::SlicedVbiOutput
-                | Self::SdrOutput
-                | Self::MetaOutput
+            Self::VIDEO_OUTPUT
+                | Self::VIDEO_OUTPUT_MPLANE
+                | Self::VIDEO_OUTPUT_OVERLAY
+                | Self::VBI_OUTPUT
+                | Self::SLICED_VBI_OUTPUT
+                | Self::SDR_OUTPUT
+                | Self::META_OUTPUT
         )
     }
 
@@ -238,21 +236,21 @@ impl BufType {
     /// 若该值不对应任何已知变体，则返回 `None`。
     pub fn try_from_u32(v: u32) -> Option<Self> {
         Some(match v {
-            1 => Self::VideoCapture,
-            2 => Self::VideoOutput,
-            3 => Self::VideoOverlay,
-            4 => Self::VbiCapture,
-            5 => Self::VbiOutput,
-            6 => Self::SlicedVbiCapture,
-            7 => Self::SlicedVbiOutput,
-            8 => Self::VideoOutputOverlay,
-            9 => Self::VideoCaptureMplane,
-            10 => Self::VideoOutputMplane,
-            11 => Self::SdrCapture,
-            12 => Self::SdrOutput,
-            13 => Self::MetaCapture,
-            14 => Self::MetaOutput,
-            0x80 => Self::Private,
+            1 => Self::VIDEO_CAPTURE,
+            2 => Self::VIDEO_OUTPUT,
+            3 => Self::VIDEO_OVERLAY,
+            4 => Self::VBI_CAPTURE,
+            5 => Self::VBI_OUTPUT,
+            6 => Self::SLICED_VBI_CAPTURE,
+            7 => Self::SLICED_VBI_OUTPUT,
+            8 => Self::VIDEO_OUTPUT_OVERLAY,
+            9 => Self::VIDEO_CAPTURE_MPLANE,
+            10 => Self::VIDEO_OUTPUT_MPLANE,
+            11 => Self::SDR_CAPTURE,
+            12 => Self::SDR_OUTPUT,
+            13 => Self::META_CAPTURE,
+            14 => Self::META_OUTPUT,
+            0x80 => Self::PRIVATE,
             _ => return None,
         })
     }

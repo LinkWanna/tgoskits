@@ -23,12 +23,11 @@ bitflags! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Memory(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl Memory {
-    pub const Mmap: Self = Self(1);
-    pub const Userptr: Self = Self(2);
-    pub const Overlay: Self = Self(3);
-    pub const Dmabuf: Self = Self(4);
+    pub const MMAP: Self = Self(1);
+    pub const USERPTR: Self = Self(2);
+    pub const OVERLAY: Self = Self(3);
+    pub const DMABUF: Self = Self(4);
 }
 
 // ========================================================================

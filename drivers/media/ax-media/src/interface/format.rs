@@ -38,15 +38,15 @@ impl Default for PixFormat {
             width: 0,
             height: 0,
             pixelformat: 0,
-            field: Field::Any,
+            field: Field::ANY,
             bytesperline: 0,
             sizeimage: 0,
-            colorspace: Colorspace::Default,
+            colorspace: Colorspace::DEFAULT,
             priv_data: 0,
             flags: 0,
             ycbcr_enc: YcbcrEncoding::Default as u32,
-            quantization: Quantization::Default,
-            xfer_func: XferFunc::Default,
+            quantization: Quantization::DEFAULT,
+            xfer_func: XferFunc::DEFAULT,
         }
     }
 }
@@ -207,19 +207,18 @@ pub struct FrameSizeEnum {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameSizeType(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl FrameSizeType {
-    pub const Discrete: Self = Self(1);
-    pub const Continuous: Self = Self(2);
-    pub const Stepwise: Self = Self(3);
+    pub const DISCRETE: Self = Self(1);
+    pub const CONTINUOUS: Self = Self(2);
+    pub const STEPWISE: Self = Self(3);
 }
 
 impl FrameSizeType {
     pub fn try_from_u32(v: u32) -> Option<Self> {
         Some(match v {
-            1 => Self::Discrete,
-            2 => Self::Continuous,
-            3 => Self::Stepwise,
+            1 => Self::DISCRETE,
+            2 => Self::CONTINUOUS,
+            3 => Self::STEPWISE,
             _ => return None,
         })
     }
@@ -261,19 +260,18 @@ pub struct FrameIntervalEnum {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameIntervalType(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl FrameIntervalType {
-    pub const Discrete: Self = Self(1);
-    pub const Continuous: Self = Self(2);
-    pub const Stepwise: Self = Self(3);
+    pub const DISCRETE: Self = Self(1);
+    pub const CONTINUOUS: Self = Self(2);
+    pub const STEPWISE: Self = Self(3);
 }
 
 impl FrameIntervalType {
     pub fn try_from_u32(v: u32) -> Option<Self> {
         Some(match v {
-            1 => Self::Discrete,
-            2 => Self::Continuous,
-            3 => Self::Stepwise,
+            1 => Self::DISCRETE,
+            2 => Self::CONTINUOUS,
+            3 => Self::STEPWISE,
             _ => return None,
         })
     }

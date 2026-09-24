@@ -29,30 +29,29 @@ pub struct Crop {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectionTarget(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl SelectionTarget {
-    pub const Crop: Self = Self(0x0000);
-    pub const CropDefault: Self = Self(0x0001);
-    pub const CropBounds: Self = Self(0x0002);
-    pub const NativeSize: Self = Self(0x0003);
-    pub const Compose: Self = Self(0x0100);
-    pub const ComposeDefault: Self = Self(0x0101);
-    pub const ComposeBounds: Self = Self(0x0102);
-    pub const ComposePadded: Self = Self(0x0103);
+    pub const CROP: Self = Self(0x0000);
+    pub const CROP_DEFAULT: Self = Self(0x0001);
+    pub const CROP_BOUNDS: Self = Self(0x0002);
+    pub const NATIVE_SIZE: Self = Self(0x0003);
+    pub const COMPOSE: Self = Self(0x0100);
+    pub const COMPOSE_DEFAULT: Self = Self(0x0101);
+    pub const COMPOSE_BOUNDS: Self = Self(0x0102);
+    pub const COMPOSE_PADDED: Self = Self(0x0103);
 }
 
 impl SelectionTarget {
     /// 尝试将原始 `u32` 转换为 [`SelectionTarget`]。
     pub fn try_from_u32(v: u32) -> Option<Self> {
         Some(match v {
-            0x0000 => Self::Crop,
-            0x0001 => Self::CropDefault,
-            0x0002 => Self::CropBounds,
-            0x0003 => Self::NativeSize,
-            0x0100 => Self::Compose,
-            0x0101 => Self::ComposeDefault,
-            0x0102 => Self::ComposeBounds,
-            0x0103 => Self::ComposePadded,
+            0x0000 => Self::CROP,
+            0x0001 => Self::CROP_DEFAULT,
+            0x0002 => Self::CROP_BOUNDS,
+            0x0003 => Self::NATIVE_SIZE,
+            0x0100 => Self::COMPOSE,
+            0x0101 => Self::COMPOSE_DEFAULT,
+            0x0102 => Self::COMPOSE_BOUNDS,
+            0x0103 => Self::COMPOSE_PADDED,
             _ => return None,
         })
     }

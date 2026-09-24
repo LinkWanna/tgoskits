@@ -7,18 +7,17 @@ use bitflags::bitflags;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChipMatch(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl ChipMatch {
-    pub const Bridge: Self = Self(0);
-    pub const Subdev: Self = Self(4);
+    pub const BRIDGE: Self = Self(0);
+    pub const SUBDEV: Self = Self(4);
 }
 
 impl ChipMatch {
     /// 尝试将原始 `u32` 转换为 [`ChipMatch`]。
     pub fn try_from_u32(v: u32) -> Option<Self> {
         Some(match v {
-            0 => Self::Bridge,
-            4 => Self::Subdev,
+            0 => Self::BRIDGE,
+            4 => Self::SUBDEV,
             _ => return None,
         })
     }

@@ -64,7 +64,7 @@ impl V4l2Fh {
 
     /// 订阅事件。
     pub fn subscribe(&mut self, sub: &EventSubscription) -> Result<()> {
-        if sub.ty == EventType::All {
+        if sub.ty == EventType::ALL {
             return Err(V4l2Error::InvalidArgument);
         }
         if self.is_subscribed(sub.ty, sub.id) {
@@ -83,7 +83,7 @@ impl V4l2Fh {
 
     /// 取消订阅。
     pub fn unsubscribe(&mut self, sub: &EventSubscription) {
-        if sub.ty == EventType::All {
+        if sub.ty == EventType::ALL {
             self.unsubscribe_all();
             return;
         }
@@ -165,7 +165,7 @@ impl V4l2Fh {
 
     fn subscription_params(ty: EventType) -> (usize, OverflowStrategy) {
         match ty {
-            EventType::Ctrl => (EVENT_QUEUE_DEFAULT_ELEMS, OverflowStrategy::Ctrl),
+            EventType::CTRL => (EVENT_QUEUE_DEFAULT_ELEMS, OverflowStrategy::Ctrl),
             _ => (EVENT_QUEUE_DEFAULT_ELEMS, OverflowStrategy::DropOldest),
         }
     }
@@ -261,7 +261,7 @@ pub fn build_ctrl_event(params: CtrlEventParams, changes: CtrlChange) -> Event {
     let mut data = [0u8; 64];
     ctrl.write_into(&mut data);
     Event {
-        ty: EventType::Ctrl.0,
+        ty: EventType::CTRL.0,
         pad: 0,
         data,
         pending: 0,

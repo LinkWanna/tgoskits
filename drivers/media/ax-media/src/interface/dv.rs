@@ -9,10 +9,9 @@ use crate::interface::Fract;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DvInterlaced(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl DvInterlaced {
-    pub const Progressive: Self = Self(0);
-    pub const Interlaced: Self = Self(1);
+    pub const PROGRESSIVE: Self = Self(0);
+    pub const INTERLACED: Self = Self(1);
 }
 
 bitflags! {

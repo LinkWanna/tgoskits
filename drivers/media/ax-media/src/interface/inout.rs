@@ -29,20 +29,19 @@ pub struct Input {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputType(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl InputType {
-    pub const Tuner: Self = Self(1);
-    pub const Camera: Self = Self(2);
-    pub const Touch: Self = Self(3);
+    pub const TUNER: Self = Self(1);
+    pub const CAMERA: Self = Self(2);
+    pub const TOUCH: Self = Self(3);
 }
 
 impl InputType {
     /// 尝试将原始 `u32` 转换为 [`InputType`]。
     pub fn try_from_u32(v: u32) -> Option<Self> {
         Some(match v {
-            1 => Self::Tuner,
-            2 => Self::Camera,
-            3 => Self::Touch,
+            1 => Self::TUNER,
+            2 => Self::CAMERA,
+            3 => Self::TOUCH,
             _ => return None,
         })
     }
@@ -105,20 +104,19 @@ pub struct Output {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputType(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl OutputType {
-    pub const Modulator: Self = Self(1);
-    pub const Analog: Self = Self(2);
-    pub const AnalogVgaOverlay: Self = Self(3);
+    pub const MODULATOR: Self = Self(1);
+    pub const ANALOG: Self = Self(2);
+    pub const ANALOG_VGA_OVERLAY: Self = Self(3);
 }
 
 impl OutputType {
     /// 尝试将原始 `u32` 转换为 [`OutputType`]。
     pub fn try_from_u32(v: u32) -> Option<Self> {
         Some(match v {
-            1 => Self::Modulator,
-            2 => Self::Analog,
-            3 => Self::AnalogVgaOverlay,
+            1 => Self::MODULATOR,
+            2 => Self::ANALOG,
+            3 => Self::ANALOG_VGA_OVERLAY,
             _ => return None,
         })
     }

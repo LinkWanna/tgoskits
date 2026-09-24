@@ -12,7 +12,7 @@ use crate::interface::Timespec;
 #[derive(Debug, Clone, Copy)]
 pub struct EventSubscription {
     pub ty: EventType,        // [in] 事件类型
-    pub id: u32,              // [in] 关联 ID（例如 [`EventType::Ctrl`] 对应的控制 ID）
+    pub id: u32,              // [in] 关联 ID（例如 [`EventType::CTRL`] 对应的控制 ID）
     pub flags: EventSubFlags, // [in] 事件订阅标志
     pub reserved: [u32; 5],
 }
@@ -38,30 +38,29 @@ pub struct Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventType(pub u32);
 
-#[allow(non_upper_case_globals)]
 impl EventType {
-    pub const All: Self = Self(0);
-    pub const Vsync: Self = Self(1); // 垂直同步信号事件（Vertical Sync）
-    pub const Eos: Self = Self(2); // 流结束事件（End Of Stream）
-    pub const Ctrl: Self = Self(3); // 控件变化事件（Control Change）
-    pub const FrameSync: Self = Self(4); // 帧同步事件（Frame Sync）
-    pub const SourceChange: Self = Self(5); // 信号源变化事件（Source Change）
-    pub const MotionDet: Self = Self(6); // 运动检测事件（Motion Detection）
-    pub const PrivateStart: Self = Self(0x0800_0000);
+    pub const ALL: Self = Self(0);
+    pub const VSYNC: Self = Self(1); // 垂直同步信号事件（Vertical Sync）
+    pub const EOS: Self = Self(2); // 流结束事件（End Of Stream）
+    pub const CTRL: Self = Self(3); // 控件变化事件（Control Change）
+    pub const FRAME_SYNC: Self = Self(4); // 帧同步事件（Frame Sync）
+    pub const SOURCE_CHANGE: Self = Self(5); // 信号源变化事件（Source Change）
+    pub const MOTION_DET: Self = Self(6); // 运动检测事件（Motion Detection）
+    pub const PRIVATE_START: Self = Self(0x0800_0000);
 }
 
 impl EventType {
     /// 尝试将原始 `u32` 转换为 [`EventType`]。
     pub fn try_from_u32(v: u32) -> Option<Self> {
         Some(match v {
-            0 => Self::All,
-            1 => Self::Vsync,
-            2 => Self::Eos,
-            3 => Self::Ctrl,
-            4 => Self::FrameSync,
-            5 => Self::SourceChange,
-            6 => Self::MotionDet,
-            0x0800_0000 => Self::PrivateStart,
+            0 => Self::ALL,
+            1 => Self::VSYNC,
+            2 => Self::EOS,
+            3 => Self::CTRL,
+            4 => Self::FRAME_SYNC,
+            5 => Self::SOURCE_CHANGE,
+            6 => Self::MOTION_DET,
+            0x0800_0000 => Self::PRIVATE_START,
             _ => return None,
         })
     }
