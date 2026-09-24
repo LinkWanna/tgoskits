@@ -48,6 +48,22 @@ pub(crate) unsafe fn write_to_bytes<T: Copy>(bytes: &mut [u8], val: &T) {
     unsafe { ptr::write_unaligned(ptr, *val) };
 }
 
+#[cfg(test)]
+mod wire_tests {
+    use super::read_from_bytes;
+    use crate::interface::buffer::Requestbuffers;
+
+    #[test]
+    fn ioctl_input_can_hold_unknown_uapi_values() {
+        let mut bytes = [0u8; core::mem::size_of::<Requestbuffers>()];
+        bytes[4..8].copy_from_slice(&u32::MAX.to_ne_bytes());
+        bytes[8..12].copy_from_slice(&u32::MAX.to_ne_bytes());
+        let request: Requestbuffers = unsafe { read_from_bytes(&bytes) };
+        assert_eq!(request.ty.0, u32::MAX);
+        assert_eq!(request.memory.0, u32::MAX);
+    }
+}
+
 /// ioctl 分发辅助宏。
 macro_rules! ioctl_body {
     (rw, $ops:ident, $arg:ident, $method:ident, $ty:ty) => {{

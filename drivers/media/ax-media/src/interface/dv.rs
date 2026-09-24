@@ -5,11 +5,14 @@ use bitflags::bitflags;
 use crate::interface::Fract;
 
 /// 逐行/隔行 — `V4L2_DV_*`。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DvInterlaced {
-    Progressive = 0,
-    Interlaced  = 1,
+pub struct DvInterlaced(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl DvInterlaced {
+    pub const Progressive: Self = Self(0);
+    pub const Interlaced: Self = Self(1);
 }
 
 bitflags! {

@@ -1206,7 +1206,7 @@ mod tests {
         assert_eq!(fh.pending(), 1, "SEND_INITIAL queues one initial event");
 
         let out = fh.dequeue().unwrap();
-        assert_eq!(out.ty, EventType::Ctrl as u32);
+        assert_eq!(out.ty, EventType::Ctrl.0);
         assert_eq!(out.id, BRIGHTNESS);
         assert_eq!(out.reserved, [0; 8], "reserved must be zeroed");
         let payload = read_ctrl(&out);

@@ -404,6 +404,9 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
     }
 
     fn querybuf(&self, buf: &mut buffer::Buffer) -> ax_media::Result<()> {
+        if buf.ty != BufType::VideoCapture {
+            return Err(V4l2Error::InvalidArgument);
+        }
         let q = &self.pool;
         let vb = q
             .buffer_snapshot(buf.index)
@@ -445,12 +448,18 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
     }
 
     fn qbuf(&mut self, buf: &mut buffer::Buffer) -> ax_media::Result<()> {
+        if buf.ty != BufType::VideoCapture || buf.memory != Memory::Mmap {
+            return Err(V4l2Error::InvalidArgument);
+        }
         self.pool.qbuf(buf.index)?;
         buf.flags = buffer::BufFlags::QUEUED;
         Ok(())
     }
 
     fn dqbuf(&mut self, buf: &mut buffer::Buffer) -> ax_media::Result<()> {
+        if buf.ty != BufType::VideoCapture {
+            return Err(V4l2Error::InvalidArgument);
+        }
         let q = &self.pool;
         if !q.is_streaming() {
             return Err(V4l2Error::InvalidArgument);

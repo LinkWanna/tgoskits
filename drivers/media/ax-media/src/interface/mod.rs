@@ -107,19 +107,22 @@ impl Fract {
 }
 
 /// 场顺序。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Field {
-    Any          = 0, // 驱动可在无、顶场、底场、隔行中自行选择
-    NoField      = 1, // 该设备没有场
-    Top          = 2, // 仅顶场
-    Bottom       = 3, // 仅底场
-    Interlaced   = 4, // 两场隔行
-    SeqTb        = 5, // 两场顺序，先顶后底
-    SeqBt        = 6, // 两场顺序，先底后顶
-    Alternate    = 7, // 两场交替放入独立的缓冲区
-    InterlacedTb = 8, // 两场隔行，顶场在前，先传输顶场
-    InterlacedBt = 9, // 两场隔行，顶场在前，先传输底场
+pub struct Field(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl Field {
+    pub const Any: Self = Self(0); // 驱动可在无、顶场、底场、隔行中自行选择
+    pub const NoField: Self = Self(1); // 该设备没有场
+    pub const Top: Self = Self(2); // 仅顶场
+    pub const Bottom: Self = Self(3); // 仅底场
+    pub const Interlaced: Self = Self(4); // 两场隔行
+    pub const SeqTb: Self = Self(5); // 两场顺序，先顶后底
+    pub const SeqBt: Self = Self(6); // 两场顺序，先底后顶
+    pub const Alternate: Self = Self(7); // 两场交替放入独立的缓冲区
+    pub const InterlacedTb: Self = Self(8); // 两场隔行，顶场在前，先传输顶场
+    pub const InterlacedBt: Self = Self(9); // 两场隔行，顶场在前，先传输底场
 }
 
 impl Field {
@@ -164,24 +167,27 @@ impl Field {
 }
 
 /// 缓冲区 / 流类型。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BufType {
-    VideoCapture       = 1,
-    VideoOutput        = 2,
-    VideoOverlay       = 3,
-    VbiCapture         = 4,
-    VbiOutput          = 5,
-    SlicedVbiCapture   = 6,
-    SlicedVbiOutput    = 7,
-    VideoOutputOverlay = 8,
-    VideoCaptureMplane = 9,
-    VideoOutputMplane  = 10,
-    SdrCapture         = 11,
-    SdrOutput          = 12,
-    MetaCapture        = 13,
-    MetaOutput         = 14,
-    Private            = 0x80,
+pub struct BufType(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl BufType {
+    pub const VideoCapture: Self = Self(1);
+    pub const VideoOutput: Self = Self(2);
+    pub const VideoOverlay: Self = Self(3);
+    pub const VbiCapture: Self = Self(4);
+    pub const VbiOutput: Self = Self(5);
+    pub const SlicedVbiCapture: Self = Self(6);
+    pub const SlicedVbiOutput: Self = Self(7);
+    pub const VideoOutputOverlay: Self = Self(8);
+    pub const VideoCaptureMplane: Self = Self(9);
+    pub const VideoOutputMplane: Self = Self(10);
+    pub const SdrCapture: Self = Self(11);
+    pub const SdrOutput: Self = Self(12);
+    pub const MetaCapture: Self = Self(13);
+    pub const MetaOutput: Self = Self(14);
+    pub const Private: Self = Self(0x80);
 }
 
 impl BufType {

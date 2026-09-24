@@ -5,14 +5,17 @@ use bitflags::bitflags;
 // ── 调谐器类型 ─────────────────────────────────────────────────────
 
 /// 调谐器类型。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TunerType {
-    Radio     = 1,
-    AnalogTv  = 2,
-    DigitalTv = 3,
-    Sdr       = 4,
-    Rf        = 5,
+pub struct TunerType(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl TunerType {
+    pub const Radio: Self = Self(1);
+    pub const AnalogTv: Self = Self(2);
+    pub const DigitalTv: Self = Self(3);
+    pub const Sdr: Self = Self(4);
+    pub const Rf: Self = Self(5);
 }
 
 impl TunerType {

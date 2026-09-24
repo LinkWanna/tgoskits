@@ -25,17 +25,20 @@ pub struct Crop {
 }
 
 /// Selection 目标 — `V4L2_SEL_TGT_*`（见 uapi/linux/v4l2-common.h）。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelectionTarget {
-    Crop           = 0x0000,
-    CropDefault    = 0x0001,
-    CropBounds     = 0x0002,
-    NativeSize     = 0x0003,
-    Compose        = 0x0100,
-    ComposeDefault = 0x0101,
-    ComposeBounds  = 0x0102,
-    ComposePadded  = 0x0103,
+pub struct SelectionTarget(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl SelectionTarget {
+    pub const Crop: Self = Self(0x0000);
+    pub const CropDefault: Self = Self(0x0001);
+    pub const CropBounds: Self = Self(0x0002);
+    pub const NativeSize: Self = Self(0x0003);
+    pub const Compose: Self = Self(0x0100);
+    pub const ComposeDefault: Self = Self(0x0101);
+    pub const ComposeBounds: Self = Self(0x0102);
+    pub const ComposePadded: Self = Self(0x0103);
 }
 
 impl SelectionTarget {

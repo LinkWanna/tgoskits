@@ -228,14 +228,18 @@ pub(crate) fn open_usbfs_file(
         .downcast_ref::<tree::UsbDeviceOps>()
         .ok_or(crate::StarryError::InvalidInput)?;
     let manager = manager().ok_or(crate::StarryError::NoSuchDevice)?;
-    let snapshot = manager
-        .device_snapshot(ops.bus_num, ops.device_num)
+    let (snapshot, generation) = manager
+        .device_snapshot_with_generation(ops.bus_num, ops.device_num)
         .ok_or(crate::StarryError::NoSuchDevice)?;
+    if generation != ops.generation {
+        return Err(StarryError::NoSuchDevice);
+    }
     Ok(Arc::new(UsbDeviceFile {
         base: KernelFile::new(file, open_flags),
         manager,
         bus_num: ops.bus_num,
         device_num: ops.device_num,
+        generation,
         snapshot,
         lease: Mutex::new(None),
         lifecycle_lock: Mutex::new(()),
@@ -255,6 +259,7 @@ struct UsbDeviceFile {
     manager: Arc<UsbFsManager>,
     bus_num: u8,
     device_num: u8,
+    generation: u64,
     snapshot: descriptor::UsbDeviceSnapshot,
     lease: Mutex<Option<Arc<manager::UsbDeviceLease>>>,
     lifecycle_lock: Mutex<()>,
@@ -374,6 +379,18 @@ struct ClaimedEndpoint {
 }
 
 impl UsbDeviceFile {
+    fn ensure_current(&self) -> StarryResult<()> {
+        if self
+            .manager
+            .device_snapshot_with_generation(self.bus_num, self.device_num)
+            .is_some_and(|(_, generation)| generation == self.generation)
+        {
+            Ok(())
+        } else {
+            Err(StarryError::NoSuchDevice)
+        }
+    }
+
     fn live_lease(&self) -> StarryResult<Arc<manager::UsbDeviceLease>> {
         let mut lease = self.lease.lock();
         if let Some(lease) = lease.as_ref() {
@@ -383,7 +400,7 @@ impl UsbDeviceFile {
         let new_lease =
             Arc::new(
                 self.manager
-                    .acquire_device(self.bus_num, self.device_num, None, None)?,
+                    .acquire_device(self.bus_num, self.device_num, None, Some(self.generation))?,
             );
         *lease = Some(new_lease.clone());
         Ok(new_lease)
@@ -395,6 +412,35 @@ impl UsbDeviceFile {
     ) -> StarryResult<R> {
         let lease = self.live_lease()?;
         f(&lease)
+    }
+
+    fn claim_control_recipient(&self, request_type: u8, index: u16) -> StarryResult<Option<u8>> {
+        // Linux usbfs claims an interface on first use of an interface or
+        // endpoint control request. Vendor requests are exempt.
+        if request_type & 0x60 == 0x40 {
+            return Ok(None);
+        }
+        let interface = match request_type & 0x1f {
+            1 => Some(index as u8),
+            2 if index as u8 & 0x0f != 0 => Some(
+                snapshot_claimed_endpoint(
+                    &self.snapshot,
+                    index as u8,
+                    &self.claimed_interfaces.lock(),
+                )
+                .map(|endpoint| endpoint.interface)
+                .or_else(|| snapshot_endpoint_interface(&self.snapshot, index as u8))
+                .ok_or(StarryError::NotFound)?,
+            ),
+            _ => None,
+        };
+        if let Some(interface) = interface {
+            let already_claimed = self.claimed_interfaces.lock().contains_key(&interface);
+            if !already_claimed {
+                self.claim_interface(interface, 0, false)?;
+            }
+        }
+        Ok(interface)
     }
 
     fn claim_interface(
@@ -419,16 +465,12 @@ impl UsbDeviceFile {
         }
 
         let submitted = self.drain_submitted_urbs_for_interface(interface);
-        if let Err(err) = self.with_live_lease(|lease| lease.claim_interface(interface, alternate))
-        {
-            self.submitted_urbs.lock().extend(submitted);
-            return Err(err);
-        }
-        let remaining = reclaim_quiesced_urbs(submitted);
+        let remaining = cleanup_submitted_urbs(submitted, Some(USBFS_URB_CANCEL_TIMEOUT));
         if !remaining.is_empty() {
             self.submitted_urbs.lock().extend(remaining);
             return Err(StarryError::ResourceBusy);
         }
+        self.with_live_lease(|lease| lease.claim_interface(interface, alternate))?;
         self.claimed_interfaces.lock().insert(interface, alternate);
         Ok(0)
     }
@@ -441,22 +483,13 @@ impl UsbDeviceFile {
             .copied()
             .ok_or(StarryError::InvalidInput)?;
         let submitted = self.drain_submitted_urbs_for_interface(interface);
+        let remaining = cleanup_submitted_urbs(submitted, Some(USBFS_URB_CANCEL_TIMEOUT));
+        if !remaining.is_empty() {
+            self.submitted_urbs.lock().extend(remaining);
+            return Err(StarryError::ResourceBusy);
+        }
         if let Some(lease) = self.lease.lock().as_ref().cloned() {
-            if let Err(err) = lease.release_interface(interface) {
-                self.submitted_urbs.lock().extend(submitted);
-                return Err(err);
-            }
-            let remaining = reclaim_quiesced_urbs(submitted);
-            if !remaining.is_empty() {
-                self.submitted_urbs.lock().extend(remaining);
-                return Err(StarryError::ResourceBusy);
-            }
-        } else {
-            let remaining = cleanup_submitted_urbs(submitted, Some(USBFS_URB_CANCEL_TIMEOUT));
-            if !remaining.is_empty() {
-                self.submitted_urbs.lock().extend(remaining);
-                return Err(StarryError::ResourceBusy);
-            }
+            lease.release_interface(interface)?;
         }
         self.claimed_interfaces.lock().remove(&interface);
         Ok(0)
@@ -528,7 +561,12 @@ impl UsbDeviceFile {
 
         let name = self
             .manager
-            .kernel_driver_name(self.bus_num, self.device_num, get_driver.interface as u8)
+            .kernel_driver_name(
+                self.bus_num,
+                self.device_num,
+                self.generation,
+                get_driver.interface as u8,
+            )
             .ok_or(StarryError::from(crate::Errno::ENODATA))?;
         get_driver.driver.fill(0);
         get_driver.driver[..name.len()].copy_from_slice(name.as_bytes());
@@ -549,7 +587,12 @@ impl UsbDeviceFile {
             descriptor::USBDEVFS_DISCONNECT => {
                 if self
                     .manager
-                    .kernel_driver_name(self.bus_num, self.device_num, command.ifno as u8)
+                    .kernel_driver_name(
+                        self.bus_num,
+                        self.device_num,
+                        self.generation,
+                        command.ifno as u8,
+                    )
                     .is_some()
                 {
                     Err(StarryError::ResourceBusy)
@@ -1077,6 +1120,8 @@ impl UsbDeviceFile {
         if (buffer_length as usize) < 8 + w_length {
             return Err(crate::StarryError::InvalidInput);
         }
+        let interface = self.claim_control_recipient(b_request_type, w_index)?;
+        let _lifecycle_guard = self.lifecycle_lock.lock();
 
         let log = usbfs_should_log_urb();
         if log {
@@ -1121,7 +1166,7 @@ impl UsbDeviceFile {
         let submitted = SubmittedUrb {
             user_urb_ptr: arg,
             transfer: SubmittedUrbTransfer::Live(transfer),
-            interface: None,
+            interface,
             discarded: false,
             buffer,
             is_in,
@@ -1228,10 +1273,7 @@ impl UsbDeviceFile {
         let urb = (arg as *const descriptor::UsbdevfsUrb).vm_read(current)?;
         let type_ = urb.type_;
         match type_ {
-            descriptor::USBDEVFS_URB_TYPE_CONTROL => {
-                let _lifecycle_guard = self.lifecycle_lock.lock();
-                self.submit_control_urb(current, arg)
-            }
+            descriptor::USBDEVFS_URB_TYPE_CONTROL => self.submit_control_urb(current, arg),
             descriptor::USBDEVFS_URB_TYPE_BULK => self.submit_bulk_urb(current, arg),
             descriptor::USBDEVFS_URB_TYPE_INTERRUPT => self.submit_interrupt_urb(current, arg),
             descriptor::USBDEVFS_URB_TYPE_ISO => self.submit_iso_urb(current, arg),
@@ -1306,10 +1348,12 @@ impl FileLike for UsbDeviceFile {
     }
 
     fn read(&self, dst: &mut IoDst) -> StarryResult<usize> {
+        self.ensure_current()?;
         self.base.read(dst)
     }
 
     fn write(&self, src: &mut IoSrc) -> StarryResult<usize> {
+        self.ensure_current()?;
         self.base.write(src)
     }
 
@@ -1331,13 +1375,12 @@ impl FileLike for UsbDeviceFile {
         cmd: u32,
         arg: usize,
     ) -> crate::StarryResult<usize> {
+        self.ensure_current()?;
         match cmd {
             descriptor::USBDEVFS_CONTROL => {
                 let log = usbfs_should_log_urb();
-                let ctrl = descriptor::read_usbdevfs_ctrltransfer(current, arg).ok();
-                if let Some(ctrl) = ctrl
-                    && log
-                {
+                let ctrl = descriptor::read_usbdevfs_ctrltransfer(current, arg)?;
+                if log {
                     debug!(
                         "usbfs: control ioctl req_type={:#04x} req={:#04x} value={:#06x} \
                          index={:#06x} len={}",
@@ -1354,6 +1397,7 @@ impl FileLike for UsbDeviceFile {
                             current,
                             self.bus_num,
                             self.device_num,
+                            self.generation,
                             cmd,
                             arg,
                         );
@@ -1365,6 +1409,8 @@ impl FileLike for UsbDeviceFile {
                     Ok(false) => {}
                     Err(err) => return Err(err),
                 }
+                self.claim_control_recipient(ctrl.b_request_type, ctrl.w_index)?;
+                let _lifecycle_guard = self.lifecycle_lock.lock();
                 let result = self.with_live_lease(|lease| lease.ioctl(current, cmd, arg));
                 if log {
                     debug!("usbfs: control ioctl result={:?}", result);
@@ -1414,7 +1460,14 @@ impl FileLike for UsbDeviceFile {
             descriptor::USBDEVFS_REAPURBNDELAY => self.reap_urb(current, arg, true),
             descriptor::USBDEVFS_CONNECTINFO | descriptor::USBDEVFS_GET_CAPABILITIES => self
                 .manager
-                .snapshot_device_ioctl(current, self.bus_num, self.device_num, cmd, arg),
+                .snapshot_device_ioctl(
+                    current,
+                    self.bus_num,
+                    self.device_num,
+                    self.generation,
+                    cmd,
+                    arg,
+                ),
             _ => self.with_live_lease(|lease| lease.ioctl(current, cmd, arg)),
         }
     }
@@ -1635,6 +1688,35 @@ fn snapshot_has_interface(
         cursor += length;
     }
     false
+}
+
+fn snapshot_endpoint_interface(
+    snapshot: &descriptor::UsbDeviceSnapshot,
+    endpoint: u8,
+) -> Option<u8> {
+    let mut cursor = 18usize;
+    let mut interface = None;
+    let mut alternate = 0;
+    while cursor + 2 <= snapshot.descriptor_blob.len() {
+        let length = snapshot.descriptor_blob[cursor] as usize;
+        if length < 2 || cursor + length > snapshot.descriptor_blob.len() {
+            return None;
+        }
+        match snapshot.descriptor_blob[cursor + 1] {
+            0x04 if length >= 9 => {
+                interface = Some(snapshot.descriptor_blob[cursor + 2]);
+                alternate = snapshot.descriptor_blob[cursor + 3];
+            }
+            0x05 if length >= 7 && snapshot.descriptor_blob[cursor + 2] == endpoint => {
+                if alternate == 0 {
+                    return interface;
+                }
+            }
+            _ => {}
+        }
+        cursor += length;
+    }
+    None
 }
 
 fn snapshot_claimed_endpoint(

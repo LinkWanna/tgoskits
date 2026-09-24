@@ -107,7 +107,7 @@ impl V4l2Fh {
         let Some(idx) = self
             .subscribed
             .iter()
-            .position(|s| s.ty as u32 == ev.ty && s.id == ev.id)
+            .position(|s| s.ty.0 == ev.ty && s.id == ev.id)
         else {
             return QueueOutcome::NoSubscription;
         };
@@ -261,7 +261,7 @@ pub fn build_ctrl_event(params: CtrlEventParams, changes: CtrlChange) -> Event {
     let mut data = [0u8; 64];
     ctrl.write_into(&mut data);
     Event {
-        ty: EventType::Ctrl as u32,
+        ty: EventType::Ctrl.0,
         pad: 0,
         data,
         pending: 0,

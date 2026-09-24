@@ -1,34 +1,40 @@
 /// 色彩空间（Colorspace）。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Colorspace {
-    Default     = 0,  // 默认色彩空间（由驱动自行决定）。
-    Smpte170m   = 1,  // SMPTE 170M：广播电视 NTSC/PAL 标清（SDTV）。
-    Smpte240m   = 2,  // SMPTE 240M：已废弃的高清（HDTV）。
-    Rec709      = 3,  // Rec.709：高清（HDTV）。
-    System470M  = 5,  // NTSC 1953 色彩空间。
-    System470Bg = 6,  // EBU Tech 3213 PAL/SECAM。
-    Jpeg        = 7,  // 动态 JPEG（Motion-JPEG）。
-    Srgb        = 8,  // sRGB。
-    Oprgb       = 9,  // opRGB。
-    Bt2020      = 10, // BT.2020，超高清（UHDTV）。
-    Raw         = 11, // 未经处理的原始图像。
-    DciP3       = 12, // DCI-P3，影院投影机。
+pub struct Colorspace(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl Colorspace {
+    pub const Default: Self = Self(0); // 默认色彩空间（由驱动自行决定）。
+    pub const Smpte170m: Self = Self(1); // SMPTE 170M：广播电视 NTSC/PAL 标清（SDTV）。
+    pub const Smpte240m: Self = Self(2); // SMPTE 240M：已废弃的高清（HDTV）。
+    pub const Rec709: Self = Self(3); // Rec.709：高清（HDTV）。
+    pub const System470M: Self = Self(5); // NTSC 1953 色彩空间。
+    pub const System470Bg: Self = Self(6); // EBU Tech 3213 PAL/SECAM。
+    pub const Jpeg: Self = Self(7); // 动态 JPEG（Motion-JPEG）。
+    pub const Srgb: Self = Self(8); // sRGB。
+    pub const Oprgb: Self = Self(9); // opRGB。
+    pub const Bt2020: Self = Self(10); // BT.2020，超高清（UHDTV）。
+    pub const Raw: Self = Self(11); // 未经处理的原始图像。
+    pub const DciP3: Self = Self(12); // DCI-P3，影院投影机。
 }
 
 /// 传输函数。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum XferFunc {
-    Default   = 0,
-    Rec709    = 1,
-    Srgb      = 2,
-    Oprgb     = 3,
-    Smpte240m = 4,
+pub struct XferFunc(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl XferFunc {
+    pub const Default: Self = Self(0);
+    pub const Rec709: Self = Self(1);
+    pub const Srgb: Self = Self(2);
+    pub const Oprgb: Self = Self(3);
+    pub const Smpte240m: Self = Self(4);
     /// 不使用任何传输函数（xfer func）。
-    None      = 5,
-    DciP3     = 6,
-    Smpte2084 = 7,
+    pub const None: Self = Self(5);
+    pub const DciP3: Self = Self(6);
+    pub const Smpte2084: Self = Self(7);
 }
 
 /// Y'CbCr 编码。
@@ -53,10 +59,13 @@ pub enum HsvEncoding {
 }
 
 /// 量化范围。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Quantization {
-    Default   = 0,
-    FullRange = 1,
-    LimRange  = 2,
+pub struct Quantization(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl Quantization {
+    pub const Default: Self = Self(0);
+    pub const FullRange: Self = Self(1);
+    pub const LimRange: Self = Self(2);
 }

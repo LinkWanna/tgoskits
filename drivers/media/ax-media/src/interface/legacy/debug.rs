@@ -3,11 +3,14 @@
 use bitflags::bitflags;
 
 /// 芯片匹配类型 — `V4L2_CHIP_MATCH_*`。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChipMatch {
-    Bridge = 0,
-    Subdev = 4,
+pub struct ChipMatch(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl ChipMatch {
+    pub const Bridge: Self = Self(0);
+    pub const Subdev: Self = Self(4);
 }
 
 impl ChipMatch {

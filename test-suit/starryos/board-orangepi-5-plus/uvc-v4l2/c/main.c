@@ -25,6 +25,13 @@ static void check_ioctl(int fd, unsigned long request, void *arg, const char *st
     fflush(stdout);
 }
 
+static void expect_einval(int fd, unsigned long request, void *arg, const char *stage) {
+    errno = 0;
+    if (ioctl(fd, request, arg) != -1 || errno != EINVAL) die(stage);
+    printf("STARRY_UVC_V4L2_STAGE %s rejected\n", stage);
+    fflush(stdout);
+}
+
 int main(void) {
     const char *path = "/dev/video0";
     alarm(45);
@@ -71,6 +78,12 @@ int main(void) {
         .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP};
     check_ioctl(fd, VIDIOC_REQBUFS, &req, "REQBUFS");
     if (req.count < 2 || req.count > 16) die("REQBUFS_count");
+    struct v4l2_buffer invalid = {.index = 0, .type = 0xffffffffu,
+        .memory = V4L2_MEMORY_MMAP};
+    expect_einval(fd, VIDIOC_QUERYBUF, &invalid, "QUERYBUF_type");
+    invalid.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    invalid.memory = 0xffffffffu;
+    expect_einval(fd, VIDIOC_QBUF, &invalid, "QBUF_memory");
     struct mapped_buffer *mapped = calloc(req.count, sizeof(*mapped));
     if (!mapped) die("calloc");
     for (unsigned i = 0; i < req.count; i++) {
@@ -88,6 +101,9 @@ int main(void) {
 
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     check_ioctl(fd, VIDIOC_STREAMON, &type, "STREAMON");
+    invalid.type = 0xffffffffu;
+    invalid.memory = V4L2_MEMORY_MMAP;
+    expect_einval(fd, VIDIOC_DQBUF, &invalid, "DQBUF_type");
     unsigned frames = 0;
     unsigned long bytes = 0;
     for (unsigned attempt = 0; attempt < 20 && frames < 5; attempt++) {

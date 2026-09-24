@@ -25,12 +25,15 @@ pub struct Input {
 // ── 输入类型 ───────────────────────────────────────────────────────────
 
 /// 视频输入类型。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputType {
-    Tuner  = 1,
-    Camera = 2,
-    Touch  = 3,
+pub struct InputType(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl InputType {
+    pub const Tuner: Self = Self(1);
+    pub const Camera: Self = Self(2);
+    pub const Touch: Self = Self(3);
 }
 
 impl InputType {
@@ -98,12 +101,15 @@ pub struct Output {
 // ── 输出类型 ──────────────────────────────────────────────────────────
 
 /// 视频输出类型。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputType {
-    Modulator        = 1,
-    Analog           = 2,
-    AnalogVgaOverlay = 3,
+pub struct OutputType(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl OutputType {
+    pub const Modulator: Self = Self(1);
+    pub const Analog: Self = Self(2);
+    pub const AnalogVgaOverlay: Self = Self(3);
 }
 
 impl OutputType {

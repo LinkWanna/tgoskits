@@ -29,6 +29,7 @@ pub(crate) struct UvcDeviceConfig {
     pub alt_settings: Vec<AlternateSetting>,
     pub formats: Vec<VideoFormat>,
     pub vc_units: VcUnits,
+    pub uvc_version: u16,
 }
 
 fn handle_vs_block(
@@ -67,6 +68,7 @@ fn handle_vs_block(
     let mut consumed = hdr_len;
     let header: Option<InputHeaderDescriptor> = Some(hdr.clone());
     let mut cur_format: Option<(u8, VideoFormatType)> = None;
+    let mut format_count = 0usize;
 
     let mut out = Vec::new();
     // 若 wTotalLength 非 0，则块边界为 total；为 0 时以遇到非 CS_INTERFACE 为止
@@ -109,11 +111,12 @@ fn handle_vs_block(
             }
             FormatUncompressed | FormatMjpeg => {
                 let header = header.as_ref().unwrap();
-                let cur_count = cur_format.map_or(0, |(idx, _)| idx as usize);
-                if cur_count >= header.num_formats as usize {
+                format_count += 1;
+                cur_format = None;
+                if format_count > header.num_formats as usize || desc.len() < 4 || desc[3] == 0 {
                     return Err(anyhow!(
                         "VS Format count {} exceeds bNumFormats {}",
-                        cur_count + 1,
+                        format_count,
                         header.num_formats
                     )
                     .into());
@@ -137,19 +140,26 @@ fn handle_vs_block(
                     FormatMjpeg => VideoFormatType::Mjpeg,
                     _ => unreachable!(),
                 };
-                let format_index = cur_format.map_or(0, |(idx, _)| idx).wrapping_add(1);
-                cur_format = Some((format_index, format_type));
+                cur_format = Some((desc[3], format_type));
             }
             FrameUncompressed | FrameMjpeg => {
                 // 需已解析 Header 且已有 Format
                 if header.is_none() {
                     return Err(anyhow!("VS Frame before InputHeader").into());
                 }
-                if cur_format.is_none() {
-                    return Err(anyhow!("VS Frame before Format").into());
+                let Some((format_index, format_type)) = cur_format else {
+                    // The current format may have an unsupported GUID.
+                    consumed += len;
+                    continue;
+                };
+                if !matches!(
+                    (subtype, format_type),
+                    (FrameUncompressed, VideoFormatType::Uncompressed(_))
+                        | (FrameMjpeg, VideoFormatType::Mjpeg)
+                ) {
+                    consumed += len;
+                    continue;
                 }
-                let format_index = cur_format.map_or(0, |(idx, _)| idx);
-                let format_type = cur_format.map_or(VideoFormatType::Mjpeg, |(_, t)| t);
                 if let Ok(fd) = parse_frame_descriptor(desc, format_index, format_type) {
                     out.push(fd);
                 }
@@ -180,7 +190,10 @@ fn handle_vs_block(
     Ok((out, consumed))
 }
 
-fn handle_vc_block(blob: &[u8], parser: &DescriptorParser) -> Result<(VcUnits, usize), USBError> {
+fn handle_vc_block(
+    blob: &[u8],
+    parser: &DescriptorParser,
+) -> Result<(VcUnits, u16, usize), USBError> {
     use VcDescriptorSubtype::*;
 
     if blob.len() < 3 {
@@ -259,7 +272,7 @@ fn handle_vc_block(blob: &[u8], parser: &DescriptorParser) -> Result<(VcUnits, u
         consumed += len;
     }
 
-    Ok((units, consumed))
+    Ok((units, hdr.bcd_uvc, consumed))
 }
 
 /// Parse UVC device from descriptor blob.
@@ -273,6 +286,7 @@ pub(crate) fn parse_uvc_device(blob: &[u8]) -> Result<UvcDeviceConfig, USBError>
     let mut alt_settings = Vec::new();
     let mut formats = Vec::new();
     let mut vc_units = VcUnits::default();
+    let mut uvc_version = 0;
 
     let mut cur_iface: Option<(u8, u8, u8, u8, u8)> = None;
     let mut vc_parsed = false;
@@ -347,8 +361,10 @@ pub(crate) fn parse_uvc_device(blob: &[u8]) -> Result<UvcDeviceConfig, USBError>
                                 if vc_parsed {
                                     return Err(anyhow!("duplicate VC Header").into());
                                 }
-                                let (produced, consumed) = handle_vc_block(&blob[pos..], &parser)?;
+                                let (produced, version, consumed) =
+                                    handle_vc_block(&blob[pos..], &parser)?;
                                 vc_units = produced;
+                                uvc_version = version;
                                 vc_parsed = true;
                                 pos += consumed;
                                 continue;
@@ -436,6 +452,7 @@ pub(crate) fn parse_uvc_device(blob: &[u8]) -> Result<UvcDeviceConfig, USBError>
             alt_settings,
             formats,
             vc_units,
+            uvc_version,
         }),
         (None, _) => Err(anyhow!("UVC VideoControl interface not found").into()),
         (_, None) => Err(anyhow!("UVC VideoStreaming interface not found").into()),
@@ -618,6 +635,49 @@ mod tests {
         let mut interface_class_device = blob;
         interface_class_device[4..7].fill(0);
         assert!(parse_uvc_device(&interface_class_device).is_ok());
+    }
+
+    #[test]
+    fn unsupported_format_does_not_reindex_or_capture_its_frames() {
+        let mut blob = build_uvc_blob(0x01, 0x02);
+        let header = blob
+            .windows(4)
+            .position(|bytes| bytes == [13, 0x24, 0x01, 1])
+            .unwrap();
+        blob[header + 3] = 3;
+        let format = blob
+            .windows(5)
+            .position(|bytes| bytes == [27, 0x24, 0x04, 1, 1])
+            .unwrap();
+        let frame = blob
+            .windows(5)
+            .position(|bytes| bytes == [26, 0x24, 0x05, 1, 0])
+            .unwrap();
+        let mut unknown_format = blob[format..format + 27].to_vec();
+        unknown_format[3] = 2;
+        unknown_format[5..21].fill(0);
+        let mut unknown_frame = blob[frame..frame + 26].to_vec();
+        unknown_frame[5..7].copy_from_slice(&800u16.to_le_bytes());
+        let mut supported_format = blob[format..format + 27].to_vec();
+        supported_format[3] = 3;
+        let mut supported_frame = blob[frame..frame + 26].to_vec();
+        supported_frame[5..7].copy_from_slice(&1280u16.to_le_bytes());
+        let next_interface = blob
+            .windows(9)
+            .position(|bytes| bytes == [9, 0x04, 3, 1, 1, 0x0e, 0x02, 0, 0])
+            .unwrap();
+        blob.splice(
+            next_interface..next_interface,
+            unknown_format
+                .into_iter()
+                .chain(unknown_frame)
+                .chain(supported_format)
+                .chain(supported_frame),
+        );
+        let formats = parse_uvc_device(&blob).unwrap().formats;
+        assert_eq!(formats.len(), 2);
+        assert_eq!((formats[0].format_index, formats[0].width), (1, 640));
+        assert_eq!((formats[1].format_index, formats[1].width), (3, 1280));
     }
 
     #[test]

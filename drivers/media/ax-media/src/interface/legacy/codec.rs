@@ -39,13 +39,16 @@ pub struct EncIndex {
 // ── 编码器命令 ────────────────────────────────────────────────────
 
 /// 编码器命令 — `V4L2_ENC_CMD_*`。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EncCmd {
-    Start  = 0,
-    Stop   = 1,
-    Pause  = 2,
-    Resume = 3,
+pub struct EncCmd(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl EncCmd {
+    pub const Start: Self = Self(0);
+    pub const Stop: Self = Self(1);
+    pub const Pause: Self = Self(2);
+    pub const Resume: Self = Self(3);
 }
 
 bitflags! {
@@ -69,14 +72,17 @@ pub struct EncoderCmd {
 // ── 解码器命令 ────────────────────────────────────────────────────
 
 /// 解码器命令 — `V4L2_DEC_CMD_*`。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecCmd {
-    Start  = 0,
-    Stop   = 1,
-    Pause  = 2,
-    Resume = 3,
-    Flush  = 4,
+pub struct DecCmd(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl DecCmd {
+    pub const Start: Self = Self(0);
+    pub const Stop: Self = Self(1);
+    pub const Pause: Self = Self(2);
+    pub const Resume: Self = Self(3);
+    pub const Flush: Self = Self(4);
 }
 
 bitflags! {

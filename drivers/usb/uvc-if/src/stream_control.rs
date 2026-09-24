@@ -1,8 +1,21 @@
-//! UVC 1.0/1.1 26-byte VS PROBE and COMMIT wire format.
+//! UVC VS PROBE and COMMIT wire format.
+
+use alloc::vec;
 
 use usb_if::err::USBError;
 
 pub const STREAM_CONTROL_LEN: usize = 26;
+pub const STREAM_CONTROL_MAX_LEN: usize = 48;
+
+pub const fn stream_control_len(uvc_version: u16) -> usize {
+    if uvc_version < 0x0110 {
+        26
+    } else if uvc_version < 0x0150 {
+        34
+    } else {
+        48
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamControl {
@@ -17,11 +30,17 @@ pub struct StreamControl {
     pub delay: u16,
     pub max_video_frame_size: u32,
     pub max_payload_transfer_size: u32,
+    /// Opaque version-specific fields returned by the device.
+    pub extension: [u8; STREAM_CONTROL_MAX_LEN - STREAM_CONTROL_LEN],
+    pub wire_len: usize,
 }
 
 impl StreamControl {
-    pub fn to_bytes(&self) -> [u8; STREAM_CONTROL_LEN] {
-        let mut data = [0; STREAM_CONTROL_LEN];
+    pub fn to_bytes(&self) -> Result<alloc::vec::Vec<u8>, USBError> {
+        if !matches!(self.wire_len, 26 | 34 | 48) {
+            return Err(USBError::InvalidParameter);
+        }
+        let mut data = vec![0; self.wire_len];
         data[0..2].copy_from_slice(&self.hint.to_le_bytes());
         data[2] = self.format_index;
         data[3] = self.frame_index;
@@ -33,13 +52,17 @@ impl StreamControl {
         data[16..18].copy_from_slice(&self.delay.to_le_bytes());
         data[18..22].copy_from_slice(&self.max_video_frame_size.to_le_bytes());
         data[22..26].copy_from_slice(&self.max_payload_transfer_size.to_le_bytes());
-        data
+        data[STREAM_CONTROL_LEN..]
+            .copy_from_slice(&self.extension[..self.wire_len - STREAM_CONTROL_LEN]);
+        Ok(data)
     }
 
     pub fn parse(data: &[u8]) -> Result<Self, USBError> {
-        let data = data
-            .get(..STREAM_CONTROL_LEN)
-            .ok_or(USBError::InvalidParameter)?;
+        if !matches!(data.len(), 26 | 34 | 48) {
+            return Err(USBError::InvalidParameter);
+        }
+        let mut extension = [0; STREAM_CONTROL_MAX_LEN - STREAM_CONTROL_LEN];
+        extension[..data.len() - STREAM_CONTROL_LEN].copy_from_slice(&data[STREAM_CONTROL_LEN..]);
         Ok(Self {
             hint: u16::from_le_bytes(data[0..2].try_into().unwrap()),
             format_index: data[2],
@@ -52,6 +75,8 @@ impl StreamControl {
             delay: u16::from_le_bytes(data[16..18].try_into().unwrap()),
             max_video_frame_size: u32::from_le_bytes(data[18..22].try_into().unwrap()),
             max_payload_transfer_size: u32::from_le_bytes(data[22..26].try_into().unwrap()),
+            extension,
+            wire_len: data.len(),
         })
     }
 }
@@ -74,9 +99,26 @@ mod tests {
             delay: 8,
             max_video_frame_size: 614_400,
             max_payload_transfer_size: 3_072,
+            extension: [0; STREAM_CONTROL_MAX_LEN - STREAM_CONTROL_LEN],
+            wire_len: STREAM_CONTROL_LEN,
         };
-        let bytes = control.to_bytes();
+        let bytes = control.to_bytes().unwrap();
         assert_eq!(StreamControl::parse(&bytes).unwrap(), control);
         assert!(StreamControl::parse(&bytes[..25]).is_err());
+
+        for (version, length) in [(0x0100, 26), (0x0110, 34), (0x0150, 48)] {
+            assert_eq!(stream_control_len(version), length);
+            let mut extended = control;
+            extended.wire_len = length;
+            for (index, byte) in extended.extension.iter_mut().enumerate() {
+                *byte = index as u8 + 1;
+            }
+            let wire = extended.to_bytes().unwrap();
+            assert_eq!(wire.len(), length);
+            assert_eq!(
+                StreamControl::parse(&wire).unwrap().to_bytes().unwrap(),
+                wire
+            );
+        }
     }
 }

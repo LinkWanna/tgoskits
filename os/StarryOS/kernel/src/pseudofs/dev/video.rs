@@ -140,7 +140,13 @@ impl V4l2File {
         }
     }
 
-    fn ioctl_once(&self, current: &UserTaskRef, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl_once(
+        &self,
+        current: &UserTaskRef,
+        cmd: u32,
+        arg: usize,
+        wait_for_event: bool,
+    ) -> VfsResult<usize> {
         let Some(ioctl) = VideoIoctl::try_from_u32(cmd) else {
             return Err(VfsError::from(StarryError::NotATty));
         };
@@ -302,6 +308,9 @@ impl V4l2File {
                 self.drain_events();
                 Ok(0)
             }
+            Err(V4l2Error::NoEntry) if wait_for_event => {
+                Err(VfsError::from(StarryError::WouldBlock))
+            }
             Err(err) => Err(VfsError::from(map_v4l2_error(err))),
         }
     }
@@ -348,6 +357,10 @@ impl FileLike for V4l2File {
             VideoIoctl::try_from_u32(cmd),
             Some(VideoIoctl::Modern(IoctlCmd::DQBuf))
         );
+        let is_dqevent = matches!(
+            VideoIoctl::try_from_u32(cmd),
+            Some(VideoIoctl::Modern(IoctlCmd::DQEvent))
+        );
         if is_dqbuf {
             block_on_user(
                 current,
@@ -356,14 +369,23 @@ impl FileLike for V4l2File {
                     IoEvents::IN | IoEvents::ERR,
                     self.nonblocking(),
                     || {
-                        self.ioctl_once(current, cmd, arg)
+                        self.ioctl_once(current, cmd, arg, false)
                             .map_err(StarryError::from)
                     },
                 ),
             )
             .into_result()?
+        } else if is_dqevent && !self.nonblocking() {
+            block_on_user(
+                current,
+                poll_io(self, IoEvents::PRI, false, || {
+                    self.ioctl_once(current, cmd, arg, true)
+                        .map_err(StarryError::from)
+                }),
+            )
+            .into_result()?
         } else {
-            Ok(self.ioctl_once(current, cmd, arg)?)
+            Ok(self.ioctl_once(current, cmd, arg, false)?)
         }
     }
 

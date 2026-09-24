@@ -25,7 +25,7 @@ use crab_usb::{
 };
 use log::*;
 pub use stream::IsoPending;
-use uvc_if::stream_control::StreamControl;
+use uvc_if::stream_control::{StreamControl, stream_control_len};
 
 use crate::{
     frame::FrameParser,
@@ -271,6 +271,7 @@ pub struct UvcDevice<H: UvcHandle, M: VbMemOps + 'static> {
     runtime: Arc<dyn UvcRuntime>,
     vs_iface_num: u8,
     vc_iface_num: u8,
+    stream_control_len: usize,
     formats: Vec<VideoFormat>,
     alt_settings: Vec<AlternateSetting>,
     active_format: usize,
@@ -321,6 +322,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
             runtime,
             vs_iface_num: parsed.vs_iface_num,
             vc_iface_num: parsed.vc_iface_num,
+            stream_control_len: stream_control_len(parsed.uvc_version),
             ctrls: Arc::new(Mutex::new(ax_media::CtrlHandler::new())),
             vc_units: parsed.vc_units.clone(),
             formats: parsed.formats,
@@ -390,7 +392,8 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
             requested.frame_interval = interval;
         }
         self.send_vs_control(VideoStreamingControl::Probe as u8, &requested)?;
-        let response = self.get_vs_control(VideoStreamingControl::Probe as u8, 26)?;
+        let response =
+            self.get_vs_control(VideoStreamingControl::Probe as u8, self.stream_control_len)?;
         let accepted = StreamControl::parse(&response)?;
         let accepted_pos = self
             .formats
@@ -562,7 +565,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
     ) -> Result<(), USBError> {
         let vs_interface_num = self.vs_iface_num;
 
-        let data = stream_ctrl.to_bytes();
+        let data = stream_ctrl.to_bytes()?;
         let setup = ControlSetup {
             request_type: RequestType::Class,
             recipient: Recipient::Interface,
@@ -655,6 +658,8 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
                 delay: 0,
                 max_video_frame_size: max_frame_size,
                 max_payload_transfer_size: 0,
+                extension: [0; 22],
+                wire_len: self.stream_control_len,
             },
             pos,
         ))

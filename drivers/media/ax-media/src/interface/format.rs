@@ -203,12 +203,15 @@ pub struct FrameSizeEnum {
 }
 
 /// 帧大小枚举类型。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameSizeType {
-    Discrete   = 1,
-    Continuous = 2,
-    Stepwise   = 3,
+pub struct FrameSizeType(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl FrameSizeType {
+    pub const Discrete: Self = Self(1);
+    pub const Continuous: Self = Self(2);
+    pub const Stepwise: Self = Self(3);
 }
 
 impl FrameSizeType {
@@ -254,12 +257,15 @@ pub struct FrameIntervalEnum {
 }
 
 /// 帧间隔枚举类型。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameIntervalType {
-    Discrete   = 1,
-    Continuous = 2,
-    Stepwise   = 3,
+pub struct FrameIntervalType(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl FrameIntervalType {
+    pub const Discrete: Self = Self(1);
+    pub const Continuous: Self = Self(2);
+    pub const Stepwise: Self = Self(3);
 }
 
 impl FrameIntervalType {

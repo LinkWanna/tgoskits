@@ -34,17 +34,20 @@ pub struct Event {
 // ── 事件类型 ───────────────────────────────────────────────────────────
 
 /// V4L2 事件类型。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EventType {
-    All          = 0,
-    Vsync        = 1, // 垂直同步信号事件（Vertical Sync）
-    Eos          = 2, // 流结束事件（End Of Stream）
-    Ctrl         = 3, // 控件变化事件（Control Change）
-    FrameSync    = 4, // 帧同步事件（Frame Sync）
-    SourceChange = 5, // 信号源变化事件（Source Change）
-    MotionDet    = 6, // 运动检测事件（Motion Detection）
-    PrivateStart = 0x0800_0000,
+pub struct EventType(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl EventType {
+    pub const All: Self = Self(0);
+    pub const Vsync: Self = Self(1); // 垂直同步信号事件（Vertical Sync）
+    pub const Eos: Self = Self(2); // 流结束事件（End Of Stream）
+    pub const Ctrl: Self = Self(3); // 控件变化事件（Control Change）
+    pub const FrameSync: Self = Self(4); // 帧同步事件（Frame Sync）
+    pub const SourceChange: Self = Self(5); // 信号源变化事件（Source Change）
+    pub const MotionDet: Self = Self(6); // 运动检测事件（Motion Detection）
+    pub const PrivateStart: Self = Self(0x0800_0000);
 }
 
 impl EventType {

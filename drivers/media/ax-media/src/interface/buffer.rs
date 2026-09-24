@@ -19,13 +19,16 @@ bitflags! {
 }
 
 /// 缓冲区的内存映射类型。
-#[repr(u32)]
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Memory {
-    Mmap    = 1,
-    Userptr = 2,
-    Overlay = 3,
-    Dmabuf  = 4,
+pub struct Memory(pub u32);
+
+#[allow(non_upper_case_globals)]
+impl Memory {
+    pub const Mmap: Self = Self(1);
+    pub const Userptr: Self = Self(2);
+    pub const Overlay: Self = Self(3);
+    pub const Dmabuf: Self = Self(4);
 }
 
 // ========================================================================

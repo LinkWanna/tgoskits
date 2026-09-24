@@ -92,6 +92,28 @@ struct LiveInterfaceSession {
     session: InterfaceSession,
 }
 
+fn check_control_access(
+    interfaces: &BTreeMap<u8, LiveInterfaceSession>,
+    session_id: u64,
+    setup: &ControlSetup,
+) -> StarryResult<()> {
+    if matches!(setup.request_type, RequestType::Vendor) {
+        return Ok(());
+    }
+    let claimed = match setup.recipient {
+        Recipient::Interface => interfaces.get(&(setup.index as u8)),
+        Recipient::Endpoint if setup.index as u8 & 0x0f != 0 => interfaces
+            .values()
+            .find(|claimed| claimed.session.endpoint(setup.index as u8).is_ok()),
+        _ => return Ok(()),
+    };
+    match claimed {
+        Some(claimed) if claimed.owner == session_id => Ok(()),
+        Some(_) => Err(StarryError::ResourceBusy),
+        None => Err(StarryError::OperationNotPermitted),
+    }
+}
+
 pub(crate) struct LiveDeviceState {
     device: BlockingMutex<Device>,
     interfaces: BlockingMutex<BTreeMap<u8, LiveInterfaceSession>>,
@@ -303,7 +325,7 @@ impl UsbDeviceLease {
     ) -> crate::StarryResult<usize> {
         self.ensure_current()?;
         self.manager
-            .opened_device_ioctl(current, self.stable_id, cmd, arg)
+            .opened_device_ioctl(current, self.stable_id, self.session_id, cmd, arg)
     }
 
     pub(super) fn claim_interface(&self, interface: u8, alternate: u8) -> StarryResult<()> {
@@ -399,7 +421,7 @@ impl UsbDeviceLease {
     ) -> StarryResult<SubmittedTransfer> {
         self.ensure_current()?;
         self.manager
-            .live_submit_control_transfer(self.stable_id, request)
+            .live_submit_control_transfer(self.stable_id, self.session_id, request)
     }
 
     pub(super) fn control_transfer(
@@ -413,6 +435,7 @@ impl UsbDeviceLease {
         self.ensure_current()?;
         self.manager.live_control_transfer(
             self.stable_id,
+            self.session_id,
             b_request_type,
             b_request,
             w_value,
@@ -764,12 +787,14 @@ impl UsbFsManager {
         &self,
         bus_num: u8,
         device_num: u8,
+        generation: u64,
         interface: u8,
     ) -> Option<&'static str> {
         let live = self.state.lock().devices.values().find_map(|record| {
             (record.present
                 && record.snapshot.bus_num == bus_num
-                && record.snapshot.device_num == device_num)
+                && record.snapshot.device_num == device_num
+                && record.generation == generation)
                 .then(|| record.live_device.clone())
                 .flatten()
         });
@@ -837,11 +862,12 @@ impl UsbFsManager {
         &self,
         current: &crate::task::UserTaskRef,
         stable_id: UsbStableId,
+        session_id: u64,
         cmd: u32,
         arg: usize,
     ) -> crate::StarryResult<usize> {
         match cmd {
-            USBDEVFS_CONTROL => self.handle_control(current, stable_id, arg),
+            USBDEVFS_CONTROL => self.handle_control(current, stable_id, session_id, arg),
             USBDEVFS_CONNECTINFO => {
                 let snapshot = self.snapshot_by_id(stable_id)?;
                 (arg as *mut UsbdevfsConnectInfo).vm_write(
@@ -888,12 +914,16 @@ impl UsbFsManager {
         current: &crate::task::UserTaskRef,
         bus_num: u8,
         device_num: u8,
+        generation: u64,
         cmd: u32,
         arg: usize,
     ) -> StarryResult<usize> {
-        let snapshot = self
-            .device_snapshot(bus_num, device_num)
+        let (snapshot, current_generation) = self
+            .device_snapshot_with_generation(bus_num, device_num)
             .ok_or(StarryError::NotFound)?;
+        if current_generation != generation {
+            return Err(StarryError::NoSuchDevice);
+        }
         match cmd {
             USBDEVFS_CONTROL => snapshot_control_ioctl(current, &snapshot, arg),
             USBDEVFS_CONNECTINFO => {
@@ -1149,6 +1179,7 @@ impl UsbFsManager {
     fn live_control_transfer(
         &self,
         stable_id: UsbStableId,
+        session_id: u64,
         b_request_type: u8,
         b_request: u8,
         w_value: u16,
@@ -1158,10 +1189,12 @@ impl UsbFsManager {
         self.live_ensure_configured(stable_id)?;
         let setup = control_setup_from_raw(b_request_type, b_request, w_value, w_index);
         let live_device = self.live_device_by_id(stable_id)?;
+        let interfaces = live_device.interfaces.lock();
+        check_control_access(&interfaces, session_id, &setup)?;
         match direction_from_raw(b_request_type) {
-            Direction::In => wait_control(live_device, TransferRequest::control_in(setup, data))
+            Direction::In => wait_control(live_device.clone(), TransferRequest::control_in(setup, data))
                 .map(|completion| completion.actual_length),
-            Direction::Out => wait_control(live_device, TransferRequest::control_out(setup, data))
+            Direction::Out => wait_control(live_device.clone(), TransferRequest::control_out(setup, data))
                 .map(|completion| completion.actual_length),
         }
     }
@@ -1247,11 +1280,15 @@ impl UsbFsManager {
         configuration: u8,
     ) -> StarryResult<()> {
         let live_device = self.live_device_by_id(stable_id)?;
-        let mut interfaces = live_device.interfaces.lock();
+        let interfaces = live_device.interfaces.lock();
+        // A usbfs file only knows its own claims. Reconfiguration must also
+        // respect interfaces held by other files and kernel drivers.
+        if !interfaces.is_empty() {
+            return Err(StarryError::ResourceBusy);
+        }
         let mut device = live_device.device.lock();
         crate::task::future::block_on(device.set_configuration(configuration))
             .map_err(map_usb_error)?;
-        interfaces.clear();
         Ok(())
     }
 
@@ -1352,10 +1389,16 @@ impl UsbFsManager {
     fn live_submit_control_transfer(
         &self,
         stable_id: UsbStableId,
+        session_id: u64,
         request: TransferRequest,
     ) -> StarryResult<SubmittedTransfer> {
         self.live_ensure_configured(stable_id)?;
         let live_device = self.live_device_by_id(stable_id)?;
+        let interfaces = live_device.interfaces.lock();
+        let TransferRequest::Control { setup, .. } = &request else {
+            return Err(StarryError::InvalidInput);
+        };
+        check_control_access(&interfaces, session_id, setup)?;
         let request_id = live_device
             .device
             .lock()
@@ -1364,7 +1407,7 @@ impl UsbFsManager {
             .map_err(map_transfer_error)?;
         Ok(SubmittedTransfer {
             inner: SubmittedTransferInner::Control {
-                live_device,
+                live_device: live_device.clone(),
                 request_id,
             },
         })
@@ -1395,6 +1438,7 @@ impl UsbFsManager {
         &self,
         current: &crate::task::UserTaskRef,
         stable_id: UsbStableId,
+        session_id: u64,
         arg: usize,
     ) -> crate::StarryResult<usize> {
         let ctrl = read_usbdevfs_ctrltransfer(current, arg)?;
@@ -1403,6 +1447,7 @@ impl UsbFsManager {
                 let mut data = vec![0; ctrl.w_length as usize];
                 let actual = self.live_control_transfer(
                     stable_id,
+                    session_id,
                     ctrl.b_request_type,
                     ctrl.b_request,
                     ctrl.w_value,
@@ -1416,6 +1461,7 @@ impl UsbFsManager {
                 let mut data = vm_load(current, ctrl.data as *const u8, ctrl.w_length as usize)?;
                 self.live_control_transfer(
                     stable_id,
+                    session_id,
                     ctrl.b_request_type,
                     ctrl.b_request,
                     ctrl.w_value,

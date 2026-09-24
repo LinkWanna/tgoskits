@@ -54,6 +54,7 @@ struct UvcControlDef {
     name: &'static str,
     selector: u8,
     size: usize,
+    signed: bool,
     ctrl_bit: u8,
     ty: UvcCtrlType,
 }
@@ -64,6 +65,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         name: "Brightness",
         selector: processing_unit_controls::BRIGHTNESS,
         size: 2,
+        signed: true,
         ctrl_bit: 0,
         ty: UvcCtrlType::Integer,
     },
@@ -72,6 +74,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         name: "Contrast",
         selector: processing_unit_controls::CONTRAST,
         size: 2,
+        signed: false,
         ctrl_bit: 1,
         ty: UvcCtrlType::Integer,
     },
@@ -80,6 +83,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         name: "Hue",
         selector: processing_unit_controls::HUE,
         size: 2,
+        signed: true,
         ctrl_bit: 2,
         ty: UvcCtrlType::Integer,
     },
@@ -88,6 +92,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         name: "Saturation",
         selector: processing_unit_controls::SATURATION,
         size: 2,
+        signed: false,
         ctrl_bit: 3,
         ty: UvcCtrlType::Integer,
     },
@@ -96,6 +101,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         name: "Sharpness",
         selector: processing_unit_controls::SHARPNESS,
         size: 2,
+        signed: false,
         ctrl_bit: 4,
         ty: UvcCtrlType::Integer,
     },
@@ -104,6 +110,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         name: "Gamma",
         selector: processing_unit_controls::GAMMA,
         size: 2,
+        signed: false,
         ctrl_bit: 5,
         ty: UvcCtrlType::Integer,
     },
@@ -112,6 +119,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         name: "White Balance Temperature",
         selector: processing_unit_controls::WHITE_BALANCE_TEMPERATURE,
         size: 2,
+        signed: false,
         ctrl_bit: 6,
         ty: UvcCtrlType::Integer,
     },
@@ -120,6 +128,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         name: "Backlight Compensation",
         selector: processing_unit_controls::BACKLIGHT_COMPENSATION,
         size: 2,
+        signed: false,
         ctrl_bit: 8,
         ty: UvcCtrlType::Integer,
     },
@@ -128,6 +137,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         name: "Gain",
         selector: processing_unit_controls::GAIN,
         size: 2,
+        signed: false,
         ctrl_bit: 9,
         ty: UvcCtrlType::Integer,
     },
@@ -136,6 +146,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         name: "Power Line Frequency",
         selector: processing_unit_controls::POWER_LINE_FREQUENCY,
         size: 1,
+        signed: false,
         ctrl_bit: 10,
         ty: UvcCtrlType::Menu(POWER_LINE_FREQ_MENU),
     },
@@ -144,6 +155,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         name: "Hue Auto",
         selector: processing_unit_controls::HUE_AUTO,
         size: 1,
+        signed: false,
         ctrl_bit: 11,
         ty: UvcCtrlType::Boolean,
     },
@@ -152,6 +164,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         name: "Auto White Balance",
         selector: processing_unit_controls::WHITE_BALANCE_TEMPERATURE_AUTO,
         size: 1,
+        signed: false,
         ctrl_bit: 12,
         ty: UvcCtrlType::Boolean,
     },
@@ -163,6 +176,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
         name: "Exposure, Auto",
         selector: camera_terminal_controls::AE_MODE,
         size: 1,
+        signed: false,
         ctrl_bit: 1,
         ty: UvcCtrlType::Menu(EXPOSURE_AUTO_MENU),
     },
@@ -171,6 +185,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
         name: "Exposure, Auto Priority",
         selector: camera_terminal_controls::AE_PRIORITY,
         size: 1,
+        signed: false,
         ctrl_bit: 2,
         ty: UvcCtrlType::Boolean,
     },
@@ -179,6 +194,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
         name: "Exposure (Absolute)",
         selector: camera_terminal_controls::EXPOSURE_TIME_ABSOLUTE,
         size: 4,
+        signed: false,
         ctrl_bit: 3,
         ty: UvcCtrlType::Integer,
     },
@@ -187,6 +203,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
         name: "Focus (Absolute)",
         selector: camera_terminal_controls::FOCUS_ABSOLUTE,
         size: 2,
+        signed: false,
         ctrl_bit: 5,
         ty: UvcCtrlType::Integer,
     },
@@ -195,6 +212,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
         name: "Focus, Auto",
         selector: camera_terminal_controls::FOCUS_AUTO,
         size: 1,
+        signed: false,
         ctrl_bit: 17,
         ty: UvcCtrlType::Boolean,
     },
@@ -203,6 +221,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
         name: "Iris, Absolute",
         selector: camera_terminal_controls::IRIS_ABSOLUTE,
         size: 2,
+        signed: false,
         ctrl_bit: 7,
         ty: UvcCtrlType::Integer,
     },
@@ -211,6 +230,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
         name: "Zoom, Absolute",
         selector: camera_terminal_controls::ZOOM_ABSOLUTE,
         size: 2,
+        signed: false,
         ctrl_bit: 9,
         ty: UvcCtrlType::Integer,
     },
@@ -219,6 +239,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
         name: "Privacy",
         selector: camera_terminal_controls::PRIVACY,
         size: 1,
+        signed: false,
         ctrl_bit: 18,
         ty: UvcCtrlType::Boolean,
     },
@@ -230,11 +251,13 @@ fn control_supported(bitmap: &[u8], bit: u8) -> bool {
     bitmap.get(byte).is_some_and(|v| (v >> b) & 1 == 1)
 }
 
-fn decode_uvc_value(buf: &[u8]) -> Option<i64> {
+fn decode_uvc_value(buf: &[u8], signed: bool) -> Option<i64> {
     match buf.len() {
         1 => Some(buf[0] as i64),
-        2 => Some(i16::from_le_bytes([buf[0], buf[1]]) as i64),
-        4 => Some(i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as i64),
+        2 if signed => Some(i16::from_le_bytes([buf[0], buf[1]]) as i64),
+        2 => Some(u16::from_le_bytes([buf[0], buf[1]]) as i64),
+        4 if signed => Some(i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as i64),
+        4 => Some(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as i64),
         _ => None,
     }
 }
@@ -245,6 +268,21 @@ fn encode_uvc_value(v: i64, size: usize) -> Option<Vec<u8>> {
         2 => Some((v as i16).to_le_bytes().to_vec()),
         4 => Some((v as i32).to_le_bytes().to_vec()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_uvc_value;
+
+    #[test]
+    fn control_signedness_preserves_high_unsigned_values() {
+        assert_eq!(decode_uvc_value(&[0x00, 0x80], false), Some(32768));
+        assert_eq!(decode_uvc_value(&[0x00, 0x80], true), Some(-32768));
+        assert_eq!(
+            decode_uvc_value(&[0x00, 0x00, 0x00, 0x80], false),
+            Some(2147483648)
+        );
     }
 }
 
@@ -263,6 +301,7 @@ fn register_control<H: UvcHandle>(
     let name = def.name;
     let sel_raw = def.selector;
     let size = def.size;
+    let signed = def.signed;
     let ctrl_bit = def.ctrl_bit;
     let ty = def.ty;
     if ctrls.find(cid_raw).is_some() {
@@ -313,7 +352,7 @@ fn register_control<H: UvcHandle>(
             if handle.control_in(setup, &mut buf).ok()? != size {
                 return None;
             }
-            decode_uvc_value(&buf)
+            decode_uvc_value(&buf, signed)
         }
     };
 
@@ -333,7 +372,7 @@ fn register_control<H: UvcHandle>(
         {
             return Err(ax_media::V4l2Error::Io);
         }
-        let raw = decode_uvc_value(&buf).ok_or(ax_media::V4l2Error::Io)?;
+        let raw = decode_uvc_value(&buf, signed).ok_or(ax_media::V4l2Error::Io)?;
         if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
             Ok(raw.trailing_zeros() as i64)
         } else {

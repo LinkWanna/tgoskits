@@ -16,7 +16,7 @@ use usb_if::{
     host::ControlSetup,
     transfer::{Direction, Recipient, Request, RequestType},
 };
-use uvc_if::stream_control::StreamControl;
+use uvc_if::stream_control::{StreamControl, stream_control_len};
 
 // 导入描述符解析模块
 pub mod descriptors;
@@ -27,6 +27,47 @@ pub mod stream;
 pub mod frame;
 
 use crate::stream::VideoStream;
+
+fn parse_uvc_version(config: &[u8], vc_interface: u8) -> Option<u16> {
+    let mut cursor = 0;
+    let mut in_vc_interface = false;
+    while cursor + 2 <= config.len() {
+        let length = config[cursor] as usize;
+        if length < 2 || cursor + length > config.len() {
+            return None;
+        }
+        let descriptor = &config[cursor..cursor + length];
+        match descriptor[1] {
+            0x04 if length >= 9 => {
+                in_vc_interface = descriptor[2] == vc_interface
+                    && descriptor[3] == 0
+                    && descriptor[5] == 0x0e
+                    && descriptor[6] == 1;
+            }
+            0x24 if in_vc_interface && length >= 5 && descriptor[2] == 1 => {
+                return Some(u16::from_le_bytes([descriptor[3], descriptor[4]]));
+            }
+            _ => {}
+        }
+        cursor += length;
+    }
+    None
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::parse_uvc_version;
+
+    #[test]
+    fn version_comes_from_matching_vc_interface() {
+        let config = [
+            9, 0x02, 0, 0, 2, 1, 0, 0, 0, 9, 0x04, 1, 0, 0, 0x0e, 2, 0, 0, 5, 0x24, 1, 0x00, 0x01,
+            9, 0x04, 2, 0, 0, 0x0e, 1, 0, 0, 5, 0x24, 1, 0x50, 0x01,
+        ];
+        assert_eq!(parse_uvc_version(&config, 2), Some(0x0150));
+        assert_eq!(parse_uvc_version(&config, 1), None);
+    }
+}
 
 // 保持向后兼容的常量别名
 pub mod uvc_requests {
@@ -220,6 +261,8 @@ pub struct UvcDevice {
     video_streaming_session: Option<InterfaceSession>,
 
     video_streaming_interface_num: u8,
+    video_control_interface_num: u8,
+    stream_control_len: usize,
     processing_unit_id: Option<u8>, // 处理单元ID
     current_format: Option<VideoFormat>,
     state: UvcDeviceState,
@@ -311,6 +354,8 @@ impl UvcDevice {
             video_streaming_interface_num: video_streaming_info
                 .map(|(num, _)| num)
                 .expect("Video Streaming interface number is required"),
+            video_control_interface_num: video_control_info.0,
+            stream_control_len: 26,
             processing_unit_id: Some(1), // 通常处理单元ID为1，实际应用中应该解析描述符
             // ep_in,
             current_format: None,
@@ -388,9 +433,9 @@ impl UvcDevice {
 
         // 首先获取配置描述符头来确定总长度
         let mut header_buffer = vec![0u8; 9]; // 配置描述符头是9字节
-        self.device.control_in(setup, &mut header_buffer).await?;
+        let header_length = self.device.control_in(setup, &mut header_buffer).await?;
 
-        if header_buffer.len() < 4 {
+        if header_length < header_buffer.len() {
             Err(anyhow!("Failed to read configuration descriptor header"))?;
         }
 
@@ -412,7 +457,10 @@ impl UvcDevice {
             index: 0,           // Configuration index
         };
 
-        self.device.control_in(setup_full, &mut full_buffer).await?;
+        let actual_length = self.device.control_in(setup_full, &mut full_buffer).await?;
+        if actual_length < total_length {
+            return Err(USBError::InvalidParameter);
+        }
 
         Ok(full_buffer)
     }
@@ -766,6 +814,11 @@ impl UvcDevice {
     pub async fn set_format(&mut self, format: VideoFormat) -> Result<(), USBError> {
         debug!("Setting video format: {format:?}");
 
+        let configuration = self.get_full_configuration_descriptor().await?;
+        let version = parse_uvc_version(&configuration, self.video_control_interface_num)
+            .ok_or(USBError::InvalidParameter)?;
+        self.stream_control_len = stream_control_len(version);
+
         // 参考 libuvc 实现，需要先 probe 然后 commit
         // 1. 构建 VS stream control 结构
         let mut stream_ctrl = self.build_stream_control(&format).await?;
@@ -778,7 +831,7 @@ impl UvcDevice {
         // 3. 获取设备的 PROBE 响应
         debug!("Getting PROBE response");
         let probe_response = self
-            .get_vs_control(vs_controls::VS_PROBE_CONTROL, 26)
+            .get_vs_control(vs_controls::VS_PROBE_CONTROL, self.stream_control_len)
             .await?;
         stream_ctrl = StreamControl::parse(&probe_response)?;
 
@@ -1046,6 +1099,8 @@ impl UvcDevice {
             delay: 0,            // 默认为 0
             max_video_frame_size: max_frame_size,
             max_payload_transfer_size: 0, // 让设备决定，参考 libuvc
+            extension: [0; 22],
+            wire_len: self.stream_control_len,
         })
     }
 
@@ -1128,7 +1183,7 @@ impl UvcDevice {
         let vs_interface_num = self.video_streaming_interface_num;
 
         // 序列化 StreamControl 到字节数组
-        let data = stream_ctrl.to_bytes();
+        let data = stream_ctrl.to_bytes()?;
 
         let setup = ControlSetup {
             request_type: RequestType::Class,
@@ -1167,7 +1222,10 @@ impl UvcDevice {
         };
 
         let mut buffer = vec![0u8; length];
-        self.device.control_in(setup, &mut buffer).await?;
+        let actual = self.device.control_in(setup, &mut buffer).await?;
+        if actual != length {
+            return Err(USBError::InvalidParameter);
+        }
 
         debug!(
             "Received VS control response: selector=0x{:02x}, data_len={}",
