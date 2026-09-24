@@ -445,10 +445,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
             let interval = *self.cur_frame_interval.lock();
             self.probe_format(format, Some(interval))?;
         }
-        let control = self
-            .probed_control
-            .clone()
-            .ok_or(USBError::NotInitialized)?;
+        let control = self.probed_control.ok_or(USBError::NotInitialized)?;
         self.send_vs_control(VideoStreamingControl::Commit as u8, &control)?;
         let best = self.alt_settings[self.active_alt_setting].clone();
         log::info!(
