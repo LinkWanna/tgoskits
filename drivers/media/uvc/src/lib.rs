@@ -283,6 +283,7 @@ pub struct UvcDevice<H: UvcHandle, M: VbMemOps + 'static> {
     stream: Mutex<Option<IsoStreamWorker>>,
     events: Arc<Mutex<Vec<ax_media::interface::event::Event>>>,
     pub(crate) cur_frame_interval: Mutex<u32>,
+    pub(crate) bus_info: [u8; 32],
 }
 
 impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
@@ -297,6 +298,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
         runtime: Arc<dyn UvcRuntime>,
         monotonic_nanos: fn() -> u64,
         descriptor_blob: &[u8],
+        bus_info: &str,
     ) -> Result<Self, USBError> {
         let parsed = parse_uvc_device(descriptor_blob).inspect_err(|err| {
             warn!("[UVC] Failed to parse UVC descriptor blob: {err:?}");
@@ -317,6 +319,9 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
                 }
             })
             .unwrap_or(333_333);
+        let mut bus_info_bytes = [0; 32];
+        let copy_len = bus_info.len().min(bus_info_bytes.len() - 1);
+        bus_info_bytes[..copy_len].copy_from_slice(&bus_info.as_bytes()[..copy_len]);
         let device = Self {
             handle: Arc::new(handle),
             runtime,
@@ -334,6 +339,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
             stream: Mutex::new(None),
             events: Arc::new(Mutex::new(Vec::new())),
             cur_frame_interval: Mutex::new(initial_interval),
+            bus_info: bus_info_bytes,
         };
 
         for fmt in &device.formats {

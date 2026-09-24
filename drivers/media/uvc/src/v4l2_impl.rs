@@ -94,7 +94,6 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
     fn querycap(&self, cap: &mut Capability) -> ax_media::Result<()> {
         let driver = b"uvc\0\0\0\0\0\0\0\0\0\0\0\0\0";
         let card = b"Starry UVC Camera\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
-        let bus = b"usb-sg2002\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
         cap.capabilities = Capabilities::VIDEO_CAPTURE
             | Capabilities::STREAMING
@@ -104,7 +103,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
 
         cap.driver[..driver.len()].copy_from_slice(driver);
         cap.card[..card.len()].copy_from_slice(card);
-        cap.bus_info[..bus.len()].copy_from_slice(bus);
+        cap.bus_info = self.bus_info;
         cap.version = 0x00060000;
         cap.reserved = [0; 3];
 

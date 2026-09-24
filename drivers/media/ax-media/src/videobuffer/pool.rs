@@ -125,22 +125,21 @@ impl<M: VbMemOps> VbPool<M> {
             return None;
         }
         let generation = inner.generation;
-        for (idx, vb) in inner.buffers.iter_mut().enumerate() {
-            if vb.state == BufferState::Ready {
-                let plane = vb.planes.first()?;
-                if plane.length == 0 {
-                    continue;
-                }
-                vb.state = BufferState::Active;
-                return Some(ActiveFrame {
-                    buffer_index: idx as u32,
-                    generation,
-                    data_ptr: plane.as_ptr(),
-                    len: plane.length as usize,
-                });
-            }
-        }
-        None
+        let index = inner.ready_queue.iter().copied().find(|&index| {
+            inner.buffers.get(index as usize).is_some_and(|buffer| {
+                buffer.state == BufferState::Ready
+                    && buffer.planes.first().is_some_and(|plane| plane.length != 0)
+            })
+        })?;
+        let buffer = &mut inner.buffers[index as usize];
+        let plane = buffer.planes.first()?;
+        buffer.state = BufferState::Active;
+        Some(ActiveFrame {
+            buffer_index: index,
+            generation,
+            data_ptr: plane.as_ptr(),
+            len: plane.length as usize,
+        })
     }
 
     /// 获取安全租约——始终返回 `VbPoolLease`，内部 `frame` 可能为 `None`（池空）。

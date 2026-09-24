@@ -252,7 +252,6 @@ pub(crate) fn open_usbfs_file(
 }
 
 static USBFS_URB_LOG_BUDGET: AtomicUsize = AtomicUsize::new(96);
-const USBFS_URB_CANCEL_TIMEOUT: Duration = Duration::from_secs(1);
 
 struct UsbDeviceFile {
     base: KernelFile,
@@ -470,11 +469,9 @@ impl UsbDeviceFile {
             return Err(err);
         }
         self.claimed_interfaces.lock().insert(interface, alternate);
-        let remaining = cleanup_submitted_urbs(submitted, Some(USBFS_URB_CANCEL_TIMEOUT));
-        if !remaining.is_empty() {
-            self.submitted_urbs.lock().extend(remaining);
-            return Err(StarryError::ResourceBusy);
-        }
+        // The alternate setting has changed and its old endpoints are quiesced.
+        // Do not return while an old URB still owns a controller request.
+        cleanup_submitted_urbs(submitted);
         Ok(0)
     }
 
@@ -495,7 +492,7 @@ impl UsbDeviceFile {
         self.claimed_interfaces.lock().remove(&interface);
         // Release quiesces the endpoint. Keep this fd alive until every URB
         // reaches a terminal state so user buffers can be reused on return.
-        let _ = cleanup_submitted_urbs(submitted, None);
+        cleanup_submitted_urbs(submitted);
         Ok(0)
     }
 
@@ -627,6 +624,18 @@ impl UsbDeviceFile {
             .ok_or(StarryError::OperationNotPermitted)
     }
 
+    fn claim_endpoint_if_needed(&self, endpoint: u8) -> StarryResult<()> {
+        if self.claimed_endpoint(endpoint).is_ok() {
+            return Ok(());
+        }
+        let interface = snapshot_endpoint_interface(&self.snapshot, endpoint)
+            .ok_or(StarryError::NotFound)?;
+        if !self.claimed_interfaces.lock().contains_key(&interface) {
+            self.claim_interface(interface, 0, false)?;
+        }
+        Ok(())
+    }
+
     fn run_endpoint_transfer(
         &self,
         current: &crate::task::UserTaskRef,
@@ -636,6 +645,7 @@ impl UsbDeviceFile {
         len: usize,
         iso_packet_lengths: &[usize],
     ) -> StarryResult<usize> {
+        self.claim_endpoint_if_needed(endpoint)?;
         let _lifecycle_guard = self.lifecycle_lock.lock();
         let claimed_endpoint = self.claimed_endpoint(endpoint)?;
         if claimed_endpoint.transfer_type != transfer_type {
@@ -1008,6 +1018,8 @@ impl UsbDeviceFile {
             return Err(crate::StarryError::InvalidInput);
         }
 
+        self.claim_endpoint_if_needed(endpoint)?;
+        let _lifecycle_guard = self.lifecycle_lock.lock();
         let claimed_endpoint = self.claimed_endpoint(endpoint)?;
         if claimed_endpoint.transfer_type != transfer_type {
             return Err(StarryError::InvalidInput);
@@ -1566,7 +1578,7 @@ impl Drop for UsbDeviceFile {
         crate::task::kernel_thread_builder("usbfs-urb-cleanup".to_owned())
             .spawn(move || {
                 let _lease = lease;
-                cleanup_submitted_urbs(submitted, None);
+                cleanup_submitted_urbs(submitted);
             })
             .expect("failed to spawn kernel thread");
     }
@@ -1613,11 +1625,7 @@ fn terminal_completed_urb(
     ))
 }
 
-fn cleanup_submitted_urbs(
-    mut submitted_urbs: Vec<SubmittedUrb>,
-    timeout: Option<Duration>,
-) -> Vec<SubmittedUrb> {
-    let deadline = timeout.map(|timeout| ax_runtime::hal::time::monotonic_time() + timeout);
+fn cleanup_submitted_urbs(mut submitted_urbs: Vec<SubmittedUrb>) {
     for submitted in &submitted_urbs {
         if let Err(err) = submitted.cancel() {
             debug!(
@@ -1641,15 +1649,9 @@ fn cleanup_submitted_urbs(
         }
 
         if !submitted_urbs.is_empty() {
-            if deadline.is_some_and(|deadline| ax_runtime::hal::time::monotonic_time() >= deadline)
-            {
-                break;
-            }
             crate::task::sleep(Duration::from_millis(1));
         }
     }
-
-    submitted_urbs
 }
 
 fn reclaim_quiesced_urbs(submitted_urbs: Vec<SubmittedUrb>) -> Vec<SubmittedUrb> {

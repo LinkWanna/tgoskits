@@ -42,8 +42,8 @@ int main(void) {
 
     struct v4l2_capability cap = {0};
     check_ioctl(fd, VIDIOC_QUERYCAP, &cap, "QUERYCAP");
-    printf("STARRY_UVC_V4L2_CAP driver=%s card=%s caps=%#x device_caps=%#x\n",
-           cap.driver, cap.card, cap.capabilities, cap.device_caps);
+    printf("STARRY_UVC_V4L2_CAP driver=%s card=%s bus=%s caps=%#x device_caps=%#x\n",
+           cap.driver, cap.card, cap.bus_info, cap.capabilities, cap.device_caps);
     if (!(cap.device_caps & V4L2_CAP_VIDEO_CAPTURE) ||
         !(cap.device_caps & V4L2_CAP_STREAMING)) die("capabilities");
 
@@ -96,6 +96,13 @@ int main(void) {
         if (mapped[i].ptr == MAP_FAILED) die("mmap");
         printf("STARRY_UVC_V4L2_STAGE mmap index=%u length=%zu offset=%u\n",
                i, mapped[i].length, buf.m.offset);
+    }
+
+    /* Queue out of index order to verify the capture queue is FIFO. */
+    for (unsigned n = 0; n < req.count; n++) {
+        unsigned index = (n + req.count - 1) % req.count;
+        struct v4l2_buffer buf = {.index = index, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+            .memory = V4L2_MEMORY_MMAP};
         check_ioctl(fd, VIDIOC_QBUF, &buf, "QBUF");
     }
 
@@ -119,6 +126,7 @@ int main(void) {
         }
         if (buf.index >= req.count || buf.bytesused < 4 ||
             buf.bytesused > mapped[buf.index].length) die("frame_bounds");
+        if (frames == 0 && buf.index != req.count - 1) die("qbuf_order");
         const unsigned char *data = mapped[buf.index].ptr;
         if (data[0] != 0xff || data[1] != 0xd8) die("jpeg_soi");
         int eoi = 0;

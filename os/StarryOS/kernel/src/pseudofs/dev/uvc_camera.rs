@@ -1,6 +1,6 @@
 //! UVC V4L2 camera driver — kernel-side glue.
 
-use alloc::{boxed::Box, collections::BTreeSet, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeSet, format, sync::Arc, vec::Vec};
 use core::{future::Future, pin::Pin};
 
 use ax_sync::Mutex;
@@ -267,12 +267,14 @@ pub fn collect_uvc_snapshots() -> alloc::vec::Vec<UsbDeviceSnapshotInfo> {
 
 pub fn create_camera_driver(snap: &UsbDeviceSnapshotInfo) -> StarryResult<CameraDriver> {
     let handle = StarryUvcHandle::new(snap.clone());
+    let bus_info = format!("usb-{:03}-{:03}", snap.bus_num, snap.device_num);
     UvcDevice::new(
         handle,
         VirtualAllocator::new(),
         Arc::new(StarryUvcRuntime),
         ax_runtime::hal::time::monotonic_time_nanos,
         &snap.descriptor_blob,
+        &bus_info,
     )
     .map_err(map_uvc_error)
 }
