@@ -83,10 +83,12 @@ struct UsbDeviceRecord {
     openable: bool,
     synthetic: bool,
     next_session_id: u64,
+    generation: u64,
 }
 
 struct LiveInterfaceSession {
     owner: u64,
+    driver_name: Option<&'static str>,
     session: InterfaceSession,
 }
 
@@ -254,6 +256,7 @@ pub(super) struct UsbFsManager {
     open_lock: Mutex<()>,
     usb_activity: UsbActivity,
     irq_notify: IrqNotify,
+    next_connect_generation: AtomicU64,
 }
 
 struct UsbActivity {
@@ -274,45 +277,72 @@ pub(super) struct UsbDeviceLease {
     manager: Arc<UsbFsManager>,
     stable_id: UsbStableId,
     session_id: u64,
+    driver_name: Option<&'static str>,
+    generation: u64,
 }
 
 impl UsbDeviceLease {
+    fn ensure_current(&self) -> StarryResult<()> {
+        let state = self.manager.state.lock();
+        if state
+            .devices
+            .get(&self.stable_id)
+            .is_some_and(|record| record.present && record.generation == self.generation)
+        {
+            Ok(())
+        } else {
+            Err(StarryError::NoSuchDevice)
+        }
+    }
+
     pub(super) fn ioctl(
         &self,
         current: &crate::task::UserTaskRef,
         cmd: u32,
         arg: usize,
     ) -> crate::StarryResult<usize> {
+        self.ensure_current()?;
         self.manager
             .opened_device_ioctl(current, self.stable_id, cmd, arg)
     }
 
     pub(super) fn claim_interface(&self, interface: u8, alternate: u8) -> StarryResult<()> {
-        self.manager
-            .live_claim_interface(self.stable_id, self.session_id, interface, alternate)
+        self.ensure_current()?;
+        self.manager.live_claim_interface(
+            self.stable_id,
+            self.session_id,
+            self.driver_name,
+            interface,
+            alternate,
+        )
     }
 
     pub(super) fn set_configuration(&self, configuration: u8) -> StarryResult<()> {
+        self.ensure_current()?;
         self.manager
             .live_set_configuration(self.stable_id, configuration)
     }
 
     pub(super) fn bulk_in(&self, endpoint: u8, data: &mut [u8]) -> StarryResult<usize> {
+        self.ensure_current()?;
         self.manager
             .live_bulk_in(self.stable_id, self.session_id, endpoint, data)
     }
 
     pub(super) fn bulk_out(&self, endpoint: u8, data: &[u8]) -> StarryResult<usize> {
+        self.ensure_current()?;
         self.manager
             .live_bulk_out(self.stable_id, self.session_id, endpoint, data)
     }
 
     pub(super) fn interrupt_in(&self, endpoint: u8, data: &mut [u8]) -> StarryResult<usize> {
+        self.ensure_current()?;
         self.manager
             .live_interrupt_in(self.stable_id, self.session_id, endpoint, data)
     }
 
     pub(super) fn interrupt_out(&self, endpoint: u8, data: &[u8]) -> StarryResult<usize> {
+        self.ensure_current()?;
         self.manager
             .live_interrupt_out(self.stable_id, self.session_id, endpoint, data)
     }
@@ -323,6 +353,7 @@ impl UsbDeviceLease {
         data: &mut [u8],
         packet_lengths: &[usize],
     ) -> StarryResult<IsoTransferResult> {
+        self.ensure_current()?;
         self.manager.live_iso_in(
             self.stable_id,
             self.session_id,
@@ -338,6 +369,7 @@ impl UsbDeviceLease {
         data: &[u8],
         packet_lengths: &[usize],
     ) -> StarryResult<usize> {
+        self.ensure_current()?;
         self.manager.live_iso_out(
             self.stable_id,
             self.session_id,
@@ -352,6 +384,7 @@ impl UsbDeviceLease {
         endpoint: u8,
         request: TransferRequest,
     ) -> StarryResult<SubmittedTransfer> {
+        self.ensure_current()?;
         self.manager.live_submit_endpoint_transfer(
             self.stable_id,
             self.session_id,
@@ -364,6 +397,7 @@ impl UsbDeviceLease {
         &self,
         request: TransferRequest,
     ) -> StarryResult<SubmittedTransfer> {
+        self.ensure_current()?;
         self.manager
             .live_submit_control_transfer(self.stable_id, request)
     }
@@ -376,6 +410,7 @@ impl UsbDeviceLease {
         w_index: u16,
         data: &mut [u8],
     ) -> StarryResult<usize> {
+        self.ensure_current()?;
         self.manager.live_control_transfer(
             self.stable_id,
             b_request_type,
@@ -387,11 +422,13 @@ impl UsbDeviceLease {
     }
 
     pub(super) fn release_interface(&self, interface: u8) -> StarryResult<()> {
+        self.ensure_current()?;
         self.manager
             .live_release_interface(self.stable_id, self.session_id, interface)
     }
 
     pub(super) fn clear_halt(&self, endpoint: u8) -> StarryResult<()> {
+        self.ensure_current()?;
         self.manager
             .live_clear_halt(self.stable_id, self.session_id, endpoint)
     }
@@ -399,7 +436,8 @@ impl UsbDeviceLease {
 
 impl Drop for UsbDeviceLease {
     fn drop(&mut self) {
-        self.manager.release_device(self.stable_id);
+        self.manager
+            .release_device(self.stable_id, self.session_id, self.generation);
     }
 }
 
@@ -424,6 +462,7 @@ impl UsbFsManager {
                     openable: false,
                     synthetic: true,
                     next_session_id: 1,
+                    generation: 0,
                 },
             );
         }
@@ -437,6 +476,7 @@ impl UsbFsManager {
             open_lock: Mutex::new(()),
             usb_activity: UsbActivity::new(),
             irq_notify: IrqNotify::new(),
+            next_connect_generation: AtomicU64::new(1),
         }
     }
 
@@ -540,18 +580,24 @@ impl UsbFsManager {
             host.refresh.disable();
         }
 
-        for record in state
+        let disconnected = state
             .devices
             .values_mut()
             .filter(|record| record.host_device_id == device_id)
-        {
-            record.present = false;
-            record.openable = false;
-            record.unopened_info = None;
-        }
+            .filter_map(|record| {
+                record.present = false;
+                record.openable = false;
+                record.unopened_info = None;
+                record.live_device.take()
+            })
+            .collect::<Vec<_>>();
         state
             .devices
             .retain(|_, record| record.host_device_id != device_id || record.open_count != 0);
+        drop(state);
+        for live_device in disconnected {
+            let _ = crate::task::future::block_on(live_device.device.lock().disconnect());
+        }
     }
 
     fn has_runnable_refresh(&self) -> bool {
@@ -697,11 +743,42 @@ impl UsbFsManager {
     }
 
     pub(super) fn device_snapshot(&self, bus_num: u8, device_num: u8) -> Option<UsbDeviceSnapshot> {
+        self.device_snapshot_with_generation(bus_num, device_num)
+            .map(|(snapshot, _)| snapshot)
+    }
+
+    pub(super) fn device_snapshot_with_generation(
+        &self,
+        bus_num: u8,
+        device_num: u8,
+    ) -> Option<(UsbDeviceSnapshot, u64)> {
         self.state.lock().devices.values().find_map(|record| {
             (record.present
                 && record.snapshot.bus_num == bus_num
                 && record.snapshot.device_num == device_num)
-                .then(|| record.snapshot.clone())
+                .then(|| (record.snapshot.clone(), record.generation))
+        })
+    }
+
+    pub(super) fn kernel_driver_name(
+        &self,
+        bus_num: u8,
+        device_num: u8,
+        interface: u8,
+    ) -> Option<&'static str> {
+        let live = self.state.lock().devices.values().find_map(|record| {
+            (record.present
+                && record.snapshot.bus_num == bus_num
+                && record.snapshot.device_num == device_num)
+                .then(|| record.live_device.clone())
+                .flatten()
+        });
+        live.and_then(|device| {
+            device
+                .interfaces
+                .lock()
+                .get(&interface)
+                .and_then(|session| session.driver_name)
         })
     }
 
@@ -709,6 +786,8 @@ impl UsbFsManager {
         self: &Arc<Self>,
         bus_num: u8,
         device_num: u8,
+        driver_name: Option<&'static str>,
+        expected_generation: Option<u64>,
     ) -> StarryResult<UsbDeviceLease> {
         let _open_guard = self.open_lock.lock();
         let stable_id = {
@@ -720,10 +799,15 @@ impl UsbFsManager {
                     (record.present
                         && record.snapshot.bus_num == bus_num
                         && record.snapshot.device_num == device_num)
-                        .then_some(*stable_id)
+                        .then_some((*stable_id, record.generation))
                 })
                 .ok_or(StarryError::NotFound)?
         };
+
+        if expected_generation.is_some_and(|expected| expected != stable_id.1) {
+            return Err(StarryError::NoSuchDevice);
+        }
+        let stable_id = stable_id.0;
 
         self.ensure_live_device(stable_id)?;
 
@@ -732,6 +816,11 @@ impl UsbFsManager {
             .devices
             .get_mut(&stable_id)
             .ok_or(StarryError::NotFound)?;
+        if !record.present
+            || expected_generation.is_some_and(|expected| expected != record.generation)
+        {
+            return Err(StarryError::NoSuchDevice);
+        }
         let session_id = record.next_session_id;
         record.next_session_id = record.next_session_id.saturating_add(1).max(1);
         record.open_count = record.open_count.saturating_add(1);
@@ -739,6 +828,8 @@ impl UsbFsManager {
             manager: self.clone(),
             stable_id,
             session_id,
+            driver_name,
+            generation: record.generation,
         })
     }
 
@@ -869,7 +960,7 @@ impl UsbFsManager {
                 let record = state.devices.get_mut(&stable_id)?;
                 record.present = false;
                 record.unopened_info = None;
-                record.live_device.clone()
+                record.live_device.take()
             })
             .collect::<Vec<_>>();
 
@@ -887,7 +978,11 @@ impl UsbFsManager {
                     openable,
                     synthetic: false,
                     next_session_id: 1,
+                    generation: self.next_connect_generation.fetch_add(1, Ordering::Relaxed),
                 });
+            if !record.present {
+                record.generation = self.next_connect_generation.fetch_add(1, Ordering::Relaxed);
+            }
             record.host_device_id = device_id;
             record.snapshot = snapshot;
             record.present = true;
@@ -910,6 +1005,7 @@ impl UsbFsManager {
             Open {
                 host_device_id: RDriveDeviceId,
                 info: DeviceInfo,
+                generation: u64,
             },
             QueueRefresh {
                 host_device_id: RDriveDeviceId,
@@ -922,12 +1018,16 @@ impl UsbFsManager {
                 .devices
                 .get_mut(&stable_id)
                 .ok_or(crate::StarryError::NotFound)?;
+            if !record.present {
+                return Err(crate::StarryError::NoSuchDevice);
+            }
             if record.live_device.is_some() {
                 OpenAction::Ready
             } else if let Some(info) = record.unopened_info.take() {
                 OpenAction::Open {
                     host_device_id: record.host_device_id,
                     info,
+                    generation: record.generation,
                 }
             } else if record.synthetic || !record.openable {
                 return Err(crate::StarryError::Unsupported);
@@ -945,12 +1045,15 @@ impl UsbFsManager {
             OpenAction::Open {
                 host_device_id,
                 info,
+                generation,
             } => {
-                let live_device = match self.open_device(host_device_id, &info) {
+                let mut live_device = match self.open_device(host_device_id, &info) {
                     Ok(device) => device,
                     Err(err) => {
                         let mut state = self.state.lock();
                         if let Some(record) = state.devices.get_mut(&stable_id)
+                            && record.present
+                            && record.generation == generation
                             && record.live_device.is_none()
                             && record.unopened_info.is_none()
                         {
@@ -964,6 +1067,11 @@ impl UsbFsManager {
                     .devices
                     .get_mut(&stable_id)
                     .ok_or(crate::StarryError::NotFound)?;
+                if !record.present || record.generation != generation {
+                    drop(state);
+                    let _ = crate::task::future::block_on(live_device.disconnect());
+                    return Err(crate::StarryError::NoSuchDevice);
+                }
                 record.live_device = Some(Arc::new(LiveDeviceState {
                     device: BlockingMutex::new(live_device),
                     interfaces: BlockingMutex::new(BTreeMap::new()),
@@ -1087,6 +1195,7 @@ impl UsbFsManager {
         &self,
         stable_id: UsbStableId,
         session_id: u64,
+        driver_name: Option<&'static str>,
         interface: u8,
         alternate: u8,
     ) -> StarryResult<()> {
@@ -1109,6 +1218,7 @@ impl UsbFsManager {
             interface,
             LiveInterfaceSession {
                 owner: session_id,
+                driver_name,
                 session,
             },
         );
@@ -1316,9 +1426,39 @@ impl UsbFsManager {
         }
     }
 
-    fn release_device(&self, stable_id: UsbStableId) {
+    fn release_device(&self, stable_id: UsbStableId, session_id: u64, generation: u64) {
         let should_notify_refresh = {
             let _open_guard = self.open_lock.lock();
+            let live_device = self.state.lock().devices.get(&stable_id).and_then(|record| {
+                if record.generation == generation {
+                    record.live_device.clone()
+                } else {
+                    None
+                }
+            });
+            if let Some(live_device) = live_device {
+                let mut interfaces = live_device.interfaces.lock();
+                let owned = interfaces
+                    .iter()
+                    .filter_map(|(interface, claimed)| {
+                        (claimed.owner == session_id).then_some(*interface)
+                    })
+                    .collect::<Vec<_>>();
+                if !owned.is_empty() {
+                    let mut device = live_device.device.lock();
+                    for interface in owned {
+                        let released = interfaces.get_mut(&interface).is_some_and(|claimed| {
+                            crate::task::future::block_on(claimed.session.release(&mut device))
+                                .is_ok()
+                        });
+                        if released {
+                            interfaces.remove(&interface);
+                        } else {
+                            warn!("usbfs: could not release interface {interface} for session {session_id}");
+                        }
+                    }
+                }
+            }
             let mut state = self.state.lock();
             let Some(record) = state.devices.get_mut(&stable_id) else {
                 return;

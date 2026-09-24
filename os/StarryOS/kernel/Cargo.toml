@@ -48,8 +48,7 @@ sg2002-cvi-usb-camera = [
     "dep:cvi-vdec-uapi",
     "dep:sg200x-jpu",
 ]
-v4l2 = ["dep:ax-media"]
-uvc = ["v4l2", "dep:media-uvc"]
+uvc = ["dep:ax-media", "dep:media-uvc"]
 stack-guard-page = ["ax-runtime/stack-guard-page"]
 stack-protector = ["ax-runtime/stack-protector"]
 axtest = ["ax-runtime/fault-injection"]

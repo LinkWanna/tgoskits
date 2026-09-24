@@ -6,19 +6,18 @@ extern crate std;
 extern crate alloc;
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{future::Future, pin::Pin, sync::atomic::Ordering};
 
 use anyhow::anyhow;
 use ax_media::{
     CtrlHandler,
     interface::{colorspace, format},
-    videobuffer::{VbPool, VirtualAllocator},
+    videobuffer::{VbMemOps, VbPool},
 };
 use ax_sync::Mutex;
 use crab_usb::{
     err::USBError,
     usb_if::{
-        descriptor::Class,
         endpoint::TransferRequest,
         host::ControlSetup,
         transfer::{Recipient, RequestType},
@@ -30,7 +29,7 @@ pub use stream::IsoPending;
 use crate::{
     frame::FrameParser,
     helper::{parse_stream_control, parse_uvc_device},
-    stream::{FrameAssembler, ISO_BATCH, ISO_DEPTH, IsoStream},
+    stream::{FrameAssembler, ISO_BATCH, ISO_DEPTH, IsoStop, IsoStream},
 };
 
 pub(crate) mod controls;
@@ -56,6 +55,25 @@ pub trait UvcHandle: Send + Sync + 'static {
         endpoint: u8,
         request: TransferRequest,
     ) -> Result<IsoPending, USBError>;
+}
+
+/// Runtime capability supplied by the operating system adapter.
+pub trait UvcRuntime: Send + Sync + 'static {
+    fn spawn(
+        &self,
+        future: Pin<Box<dyn Future<Output = ()> + Send>>,
+    ) -> Result<Box<dyn UvcWorker>, USBError>;
+}
+
+/// Join handle for one UVC stream worker.
+pub trait UvcWorker: Send {
+    fn join(self: Box<Self>);
+}
+
+impl<F: FnOnce() + Send> UvcWorker for F {
+    fn join(self: Box<Self>) {
+        (*self)();
+    }
 }
 
 /// UVC frame interval description – strongly typed over the raw
@@ -171,16 +189,19 @@ impl VideoFormat {
 
     /// Frame rate in frames per second.
     pub(crate) fn frame_rate(&self) -> u32 {
-        if self.default_interval != 0 {
-            DescriptorParser::interval_to_fps(self.default_interval)
+        let interval = if self.default_interval != 0 {
+            self.default_interval
         } else {
             match &self.intervals {
-                FrameIntervals::Discrete(v) if !v.is_empty() => {
-                    DescriptorParser::interval_to_fps(v[0])
-                }
-                FrameIntervals::Continuous { min, .. } => DescriptorParser::interval_to_fps(*min),
+                FrameIntervals::Discrete(v) if !v.is_empty() => v[0],
+                FrameIntervals::Continuous { min, .. } => *min,
                 _ => 0,
             }
+        };
+        if interval == 0 {
+            0
+        } else {
+            DescriptorParser::interval_to_fps(interval)
         }
     }
 }
@@ -256,87 +277,44 @@ impl AlternateSetting {
 }
 
 pub(crate) struct IsoStreamWorker {
-    task: ax_task::AxTaskRef,
-    cancel: Arc<AtomicBool>,
+    task: Box<dyn UvcWorker>,
+    stop: Arc<IsoStop>,
 }
 
-pub struct UvcDevice<H: UvcHandle> {
+pub struct UvcDevice<H: UvcHandle, M: VbMemOps + 'static> {
     handle: Arc<H>,
+    runtime: Arc<dyn UvcRuntime>,
     vs_iface_num: u8,
     vc_iface_num: u8,
     formats: Vec<VideoFormat>,
     alt_settings: Vec<AlternateSetting>,
     active_format: usize,
     active_alt_setting: usize,
-    pub(crate) ctrls: CtrlHandler,
-    pub(crate) pool: Arc<VbPool<VirtualAllocator>>,
+    probed_control: Option<StreamControl>,
+    vc_units: controls::VcUnits,
+    pub(crate) ctrls: Arc<Mutex<CtrlHandler>>,
+    pub(crate) pool: Arc<VbPool<M>>,
     stream: Mutex<Option<IsoStreamWorker>>,
     events: Arc<Mutex<Vec<ax_media::interface::event::Event>>>,
     pub(crate) cur_frame_interval: Mutex<u32>,
 }
 
-impl<H: UvcHandle> UvcDevice<H> {
+impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
     pub fn check(blob: &[u8]) -> bool {
-        const DESC_TYPE_INTERFACE: u8 = 0x04;
-        const SUBCLASS_VC: u8 = 0x01;
-        const SUBCLASS_VS: u8 = 0x02;
-
-        if blob.len() < 18 {
-            return false;
-        }
-        let mut pos = 18usize;
-        let mut has_vc = false;
-        let mut has_vs = false;
-        while pos + 2 <= blob.len() {
-            let len = blob[pos] as usize;
-            if len < 2 || pos + len > blob.len() {
-                break;
-            }
-            let dtype = blob[pos + 1];
-            if dtype == DESC_TYPE_INTERFACE && len >= 9 {
-                let class = blob[pos + 5];
-                let subclass = blob[pos + 6];
-                let protocol = blob[pos + 7];
-                let cls = Class::from_class_and_subclass(class, subclass, protocol);
-                if matches!(cls, Class::Video) {
-                    if subclass == SUBCLASS_VC {
-                        has_vc = true;
-                    } else if subclass == SUBCLASS_VS {
-                        has_vs = true;
-                    }
-                    if has_vc && has_vs {
-                        return true;
-                    }
-                }
-            }
-            pos += len;
-        }
-        has_vc && has_vs
+        parse_uvc_device(blob).is_ok()
     }
 
     /// Create UVC device.
-    pub fn new(handle: H, descriptor_blob: &[u8]) -> Result<Self, USBError> {
+    pub fn new(
+        handle: H,
+        allocator: M,
+        runtime: Arc<dyn UvcRuntime>,
+        monotonic_nanos: fn() -> u64,
+        descriptor_blob: &[u8],
+    ) -> Result<Self, USBError> {
         let parsed = parse_uvc_device(descriptor_blob).inspect_err(|err| {
             warn!("[UVC] Failed to parse UVC descriptor blob: {err:?}");
         })?;
-
-        handle
-            .claim_interface(parsed.vc_iface_num, 0)
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to claim VC interface {}: {e:?}",
-                    parsed.vc_iface_num
-                )
-            })?;
-        handle
-            .claim_interface(parsed.vs_iface_num, 0)
-            .map_err(|e| {
-                let _ = handle.release_interface(parsed.vc_iface_num);
-                anyhow!(
-                    "Failed to claim VS interface {}: {e:?}",
-                    parsed.vs_iface_num
-                )
-            })?;
 
         let initial_interval = parsed
             .formats
@@ -353,16 +331,19 @@ impl<H: UvcHandle> UvcDevice<H> {
                 }
             })
             .unwrap_or(333_333);
-        let mut device = Self {
+        let device = Self {
             handle: Arc::new(handle),
+            runtime,
             vs_iface_num: parsed.vs_iface_num,
             vc_iface_num: parsed.vc_iface_num,
-            ctrls: ax_media::CtrlHandler::new(),
+            ctrls: Arc::new(Mutex::new(ax_media::CtrlHandler::new())),
+            vc_units: parsed.vc_units.clone(),
             formats: parsed.formats,
             alt_settings: parsed.alt_settings,
             active_format: 0,
             active_alt_setting: 0,
-            pool: Arc::new(VbPool::new(VirtualAllocator::new(), 2, 8)),
+            probed_control: None,
+            pool: Arc::new(VbPool::new(allocator, 2, 8, monotonic_nanos)),
             stream: Mutex::new(None),
             events: Arc::new(Mutex::new(Vec::new())),
             cur_frame_interval: Mutex::new(initial_interval),
@@ -383,11 +364,19 @@ impl<H: UvcHandle> UvcDevice<H> {
             "[UVC] VC units: camera_terminal={:?} processing_unit={:?}",
             parsed.vc_units.camera_terminal_id, parsed.vc_units.processing_unit_id
         );
+        let control_claimed = device
+            .handle
+            .claim_interface(device.vc_iface_num, 0)
+            .is_ok();
         device.register_controls(&parsed.vc_units);
-        info!("[UVC] registered {} controls", device.ctrls.len());
+        if control_claimed {
+            let _ = device.handle.release_interface(device.vc_iface_num);
+        }
+        info!("[UVC] registered {} controls", device.ctrls.lock().len());
         let ev = Arc::clone(&device.events);
         device
             .ctrls
+            .lock()
             .set_change_notify(Box::new(move |event| ev.lock().push(event)));
 
         Ok(device)
@@ -403,38 +392,79 @@ impl<H: UvcHandle> UvcDevice<H> {
     }
 
     pub(crate) fn set_format(&mut self, format: VideoFormat) -> Result<(), USBError> {
-        debug!("Setting video format: {format:?}");
+        self.probe_format(format, None)
+    }
 
-        let (mut stream_ctrl, pos) = self.build_stream_control(&format)?;
-
-        self.send_vs_control(VideoStreamingControl::Probe as u8, &stream_ctrl)?;
-
-        let probe_response = self.get_vs_control(VideoStreamingControl::Probe as u8, 26)?;
-        stream_ctrl = parse_stream_control(&probe_response)?;
-        let payload = stream_ctrl.max_payload_transfer_size as usize;
-        self.active_alt_setting = self.select_alt_index(payload);
+    pub(crate) fn probe_format(
+        &mut self,
+        format: VideoFormat,
+        interval: Option<u32>,
+    ) -> Result<(), USBError> {
+        let (mut requested, pos) = self.build_stream_control(&format)?;
+        if let Some(interval) = interval {
+            requested.frame_interval = interval;
+        }
+        self.send_vs_control(VideoStreamingControl::Probe as u8, &requested)?;
+        let response = self.get_vs_control(VideoStreamingControl::Probe as u8, 26)?;
+        let accepted = parse_stream_control(&response)?;
+        let accepted_pos = self
+            .formats
+            .iter()
+            .position(|fmt| {
+                fmt.format_index == accepted.format_index && fmt.frame_index == accepted.frame_index
+            })
+            .ok_or(USBError::InvalidParameter)?;
+        if accepted.frame_interval == 0 {
+            return Err(USBError::InvalidParameter);
+        }
+        if self.pool.num_buffers() != 0 {
+            let allocated = self
+                .pool
+                .buffer_snapshot(0)
+                .and_then(|buffer| buffer.planes.first().map(|plane| plane.length))
+                .ok_or(USBError::InvalidParameter)?;
+            if accepted.max_video_frame_size > allocated {
+                return Err(USBError::InvalidParameter);
+            }
+        }
+        let payload = accepted.max_payload_transfer_size as usize;
+        let alt = self.select_alt_index(payload);
+        if self.alt_settings[alt].buf_len() < payload {
+            return Err(USBError::InvalidParameter);
+        }
         info!(
-            "[UVC] PROBE: fmt_ix={} frm_ix={} interval={} max_frame={} max_payload={} \
-             active_alt={}",
-            stream_ctrl.format_index,
-            stream_ctrl.frame_index,
-            stream_ctrl.frame_interval,
-            stream_ctrl.max_video_frame_size,
-            stream_ctrl.max_payload_transfer_size,
-            self.active_alt_setting
+            "[UVC] PROBE: requested_format={} accepted_format={} interval={} max_frame={} \
+             max_payload={} alt={}",
+            pos,
+            accepted_pos,
+            accepted.frame_interval,
+            accepted.max_video_frame_size,
+            accepted.max_payload_transfer_size,
+            alt
         );
-
-        self.send_vs_control(VideoStreamingControl::Commit as u8, &stream_ctrl)?;
-
-        debug!("Video format set successfully");
-        self.active_format = pos;
-        // Keep stream interval in sync with what the device accepted.
-        let accepted_interval = stream_ctrl.frame_interval;
-        *self.cur_frame_interval.lock() = accepted_interval;
+        self.active_format = accepted_pos;
+        if accepted.max_video_frame_size != 0 {
+            self.formats[accepted_pos].max_frame_size = self.formats[accepted_pos]
+                .max_frame_size
+                .max(accepted.max_video_frame_size);
+        }
+        self.active_alt_setting = alt;
+        *self.cur_frame_interval.lock() = accepted.frame_interval;
+        self.probed_control = Some(accepted);
         Ok(())
     }
 
     pub(crate) fn start_streaming(&mut self) -> Result<(), USBError> {
+        if self.probed_control.is_none() {
+            let format = self.active_format_ref().clone();
+            let interval = *self.cur_frame_interval.lock();
+            self.probe_format(format, Some(interval))?;
+        }
+        let control = self
+            .probed_control
+            .clone()
+            .ok_or(USBError::NotInitialized)?;
+        self.send_vs_control(VideoStreamingControl::Commit as u8, &control)?;
         let best = self.alt_settings[self.active_alt_setting].clone();
         log::info!(
             "[UVC] Selected alt={} ep=0x{:02x} mps={} mult={} bInterval={}",
@@ -464,88 +494,83 @@ impl<H: UvcHandle> UvcDevice<H> {
             ISO_DEPTH,
             packet_len * ISO_BATCH * ISO_DEPTH
         );
-        let cancel = Arc::new(AtomicBool::new(false));
-        let worker = {
-            let handle = self.handle.clone();
-            let pool = self.pool.clone();
-            let endpoint = best.ep;
-            let cancel = cancel.clone();
-            let fmt = self.active_format_ref();
-            let expected = if fmt.is_compressed() {
-                None
-            } else {
-                Some(fmt.max_frame_size as usize)
-            };
-            ax_task::spawn_with_name(
-                move || {
-                    ax_task::future::block_on(async move {
-                        let mut iso = match IsoStream::new(
-                            handle.clone(),
-                            endpoint,
-                            packet_len,
-                            ISO_BATCH,
-                            ISO_DEPTH,
-                        ) {
-                            Ok(v) => v,
-                            Err(err) => {
-                                error!("[UVC] stream: init err={err:?}");
-                                pool.set_error();
-                                return;
-                            }
-                        };
-                        let mut assembler =
-                            FrameAssembler::new(FrameParser::new(), pool.acquire(), expected);
-                        loop {
-                            if cancel.load(Ordering::Acquire) {
-                                iso.cancel_all();
-                                break;
-                            }
-                            let res =
-                                core::future::poll_fn(|cx| iso.poll_next(cx, &mut assembler)).await;
-                            match res {
-                                Ok(()) => {
-                                    if cancel.load(Ordering::Acquire) {
-                                        iso.cancel_all();
-                                        break;
-                                    }
-                                }
-                                Err(err) => {
+        // Initial submissions are part of STREAMON; report failure synchronously.
+        let stop = Arc::new(IsoStop::new());
+        let mut iso = IsoStream::new(
+            self.handle.clone(),
+            self.vs_iface_num,
+            stop.clone(),
+            best.ep,
+            packet_len,
+            ISO_BATCH,
+            ISO_DEPTH,
+        )?;
+        let worker =
+            {
+                let pool = self.pool.clone();
+                let stop = stop.clone();
+                let fmt = self.active_format_ref();
+                let expected = if fmt.is_compressed() {
+                    None
+                } else {
+                    Some(fmt.max_frame_size as usize)
+                };
+                self.runtime.spawn(Box::pin(async move {
+                    let mut assembler =
+                        FrameAssembler::new(FrameParser::new(), pool.acquire(), expected);
+                    loop {
+                        if stop.cancel.load(Ordering::Acquire) {
+                            iso.cancel_all();
+                            break;
+                        }
+                        let res =
+                            core::future::poll_fn(|cx| iso.poll_next(cx, &mut assembler)).await;
+                        match res {
+                            Ok(()) => {
+                                if stop.cancel.load(Ordering::Acquire) {
                                     iso.cancel_all();
-                                    if cancel.load(Ordering::Acquire)
-                                        || matches!(
-                                            err,
-                                            USBError::TransferError(
-                                                crab_usb::usb_if::err::TransferError::Cancelled
-                                            )
-                                        )
-                                    {
-                                        break;
-                                    }
-                                    error!("[UVC] stream: iso batch failed err={err:?}");
-                                    pool.set_error();
                                     break;
                                 }
                             }
+                            Err(err) => {
+                                iso.cancel_all();
+                                if stop.cancel.load(Ordering::Acquire)
+                                    || matches!(err, USBError::TransferError(
+                                            crab_usb::usb_if::err::TransferError::Cancelled
+                                            | crab_usb::usb_if::err::TransferError::EndpointRevoked
+                                        ))
+                                {
+                                    break;
+                                }
+                                error!("[UVC] stream: iso batch failed err={err:?}");
+                                pool.set_error();
+                                break;
+                            }
                         }
-                    });
-                },
-                alloc::string::String::from("uvc-stream"),
-            )
-        };
-        *self.stream.lock() = Some(IsoStreamWorker {
-            task: worker,
-            cancel,
-        });
+                    }
+                    // Drop of IsoStream waits for controller retirement before freeing slots.
+                }))?
+            };
+        *self.stream.lock() = Some(IsoStreamWorker { task: worker, stop });
         info!("[UVC] start_streaming: iso worker armed");
         Ok(())
     }
 
     pub(crate) fn close_stream(&self) {
         if let Some(worker) = self.stream.lock().take() {
-            worker.cancel.store(true, Ordering::Release);
+            {
+                let _gate = worker.stop.submit_gate.lock();
+                worker.stop.cancel.store(true, Ordering::Release);
+                // Serialize endpoint retirement with the worker's next submission.
+                if !worker.stop.quiesced.load(Ordering::Acquire) {
+                    match self.handle.claim_interface(self.vs_iface_num, 0) {
+                        Ok(()) => worker.stop.quiesced.store(true, Ordering::Release),
+                        Err(error) => error!("[UVC] failed to stop ISO endpoint: {error:?}"),
+                    }
+                }
+            }
             worker.task.join();
         }
-        let _ = self.handle.claim_interface(self.vs_iface_num, 0);
     }
 
     fn send_vs_control(
@@ -589,9 +614,13 @@ impl<H: UvcHandle> UvcDevice<H> {
         };
 
         let mut buffer = vec![0u8; length];
-        self.handle
+        let actual = self
+            .handle
             .control_in(setup, &mut buffer)
             .map_err(|e| anyhow!("Failed to get VS control: {:?}", e))?;
+        if actual != length {
+            return Err(USBError::InvalidParameter);
+        }
 
         debug!(
             "Received VS control response: selector=0x{:02x}, data_len={}",
@@ -726,12 +755,12 @@ impl<H: UvcHandle> UvcDevice<H> {
     }
 }
 
-impl<H: UvcHandle> Drop for UvcDevice<H> {
+impl<H: UvcHandle, M: VbMemOps + 'static> Drop for UvcDevice<H, M> {
     fn drop(&mut self) {
         self.close_stream();
         self.pool.streamoff();
-        let _ = self.handle.release_interface(self.vc_iface_num);
         let _ = self.handle.release_interface(self.vs_iface_num);
+        let _ = self.handle.release_interface(self.vc_iface_num);
     }
 }
 
@@ -770,8 +799,8 @@ pub(crate) fn uvc_try_frame_interval(format: &VideoFormat, interval: u32) -> u32
             let min = *min;
             let max = *max;
             let step = *step;
-            if step == 0 {
-                return min.clamp(min, max);
+            if step == 0 || max < min {
+                return min;
             }
             if interval <= min {
                 return min;
@@ -780,8 +809,10 @@ pub(crate) fn uvc_try_frame_interval(format: &VideoFormat, interval: u32) -> u32
                 return max;
             }
             // Round to nearest step, matching Linux's `min + (interval-min+step/2)/step*step`.
-            let rounded = min + (interval - min + step / 2) / step * step;
-            if rounded > max { max } else { rounded }
+            let rounded = u64::from(min)
+                + (u64::from(interval - min) + u64::from(step / 2)) / u64::from(step)
+                    * u64::from(step);
+            rounded.min(u64::from(max)) as u32
         }
     }
 }

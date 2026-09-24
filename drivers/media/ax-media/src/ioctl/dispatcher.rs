@@ -59,7 +59,7 @@ macro_rules! ioctl_body {
     (rw_ctrl, $ops:ident, $arg:ident, $method:ident, $ty:ty) => {{
         let mut v: $ty = $crate::ioctl::read_from_bytes($arg);
         let handler = $ops.ctrl_handler().ok_or($crate::V4l2Error::NotSupported)?;
-        handler.$method(&mut v)?;
+        handler.lock().$method(&mut v)?;
         $crate::ioctl::write_to_bytes($arg, &v);
         Ok(())
     }};

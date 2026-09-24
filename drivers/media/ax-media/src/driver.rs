@@ -1,10 +1,13 @@
 //! V4L2 驱动 trait。
 
 use alloc::{sync::Arc, vec::Vec};
+use core::any::Any;
 
-use axpoll::PollSet;
+use ax_sync::Mutex;
+use axpoll_set::PollSet;
 
 use crate::{
+    Result,
     ctrls::CtrlHandler,
     ioctl::{IoctlOps, LegacyIoctlOps},
 };
@@ -12,8 +15,12 @@ use crate::{
 /// V4L2 驱动对象。
 #[allow(unused_variables)]
 pub trait V4L2DriverOps: Send + Sync + IoctlOps + LegacyIoctlOps {
+    /// Acquire device interfaces on the first file open.
+    fn open(&self) -> Result<()> {
+        Ok(())
+    }
     /// mmap 解析。
-    fn mmap(&self, offset: u64, length: u64) -> Option<(Vec<usize>, usize)> {
+    fn mmap(&self, offset: u64, length: u64) -> Option<(Vec<usize>, Arc<dyn Any + Send + Sync>)> {
         None
     }
 
@@ -45,8 +52,11 @@ pub trait V4L2DriverOps: Send + Sync + IoctlOps + LegacyIoctlOps {
     /// 释放资源。
     fn release(&self) {}
 
+    /// Tear down the queue when its owning file closes while other files remain open.
+    fn close_owner(&self) {}
+
     /// 获取控件处理器。
-    fn ctrl_handler(&self) -> Option<&CtrlHandler> {
+    fn ctrl_handler(&self) -> Option<Arc<Mutex<CtrlHandler>>> {
         None
     }
 }

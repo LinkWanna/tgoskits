@@ -127,6 +127,7 @@ pub struct VbBuffer {
 #[must_use]
 pub(crate) struct ActiveFrame {
     pub(crate) buffer_index: u32,
+    pub(crate) generation: u64,
     pub(crate) data_ptr: *mut u8,
     pub(crate) len: usize,
 }

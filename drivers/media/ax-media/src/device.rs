@@ -1,14 +1,14 @@
 //! V4L2 设备抽象。
 
-use alloc::{sync::Arc, vec::Vec};
-use core::{
-    future::poll_fn,
-    sync::atomic::{AtomicU32, Ordering},
-    task::Poll,
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
 };
+use core::any::Any;
 
 use ax_sync::Mutex;
-use axpoll::{IoEvents, PollSet};
+use axpoll::IoEvents;
+use axpoll_set::PollSet;
 
 use crate::{
     Result, V4l2Error,
@@ -19,7 +19,7 @@ use crate::{
         ctrl::{ExtControl, ExtControls},
         event::{Event, EventSubscription},
     },
-    ioctl::{IoctlCmd, IoctlDispatcher, VideoIoctl},
+    ioctl::{IoctlCmd, IoctlDispatcher, LegacyIoctlCmd, VideoIoctl},
 };
 
 /// V4L2 视频设备。
@@ -27,9 +27,31 @@ pub struct VideoDevice {
     driver: Arc<Mutex<dyn V4L2DriverOps>>,
     dispatcher: Mutex<IoctlDispatcher>,
     name: &'static str,
-    fh: Mutex<Option<V4l2Fh>>,
-    open_count: AtomicU32,
-    event_poll_rx: Arc<PollSet>,
+    sessions: Mutex<Sessions>,
+}
+
+struct Sessions {
+    files: Vec<Weak<VideoFile>>,
+    exclusive: bool,
+    owner: Option<Weak<VideoFile>>,
+}
+
+/// State owned by one open video file description. Duplicated descriptors share it.
+pub struct VideoFile {
+    fh: Mutex<V4l2Fh>,
+    event_poll: Arc<PollSet>,
+}
+
+impl VideoFile {
+    /// The event readiness source for this file description.
+    pub fn event_poll_set(&self) -> &Arc<PollSet> {
+        &self.event_poll
+    }
+
+    /// Whether this file description has a pending event.
+    pub fn has_pending_events(&self) -> bool {
+        self.fh.lock().pending() > 0
+    }
 }
 
 impl VideoDevice {
@@ -39,9 +61,11 @@ impl VideoDevice {
             driver,
             dispatcher: Mutex::new(IoctlDispatcher::new()),
             name,
-            fh: Mutex::new(None),
-            open_count: AtomicU32::new(0),
-            event_poll_rx: Arc::new(PollSet::new()),
+            sessions: Mutex::new(Sessions {
+                files: Vec::new(),
+                exclusive: false,
+                owner: None,
+            }),
         }
     }
 
@@ -51,96 +75,141 @@ impl VideoDevice {
     }
 
     /// 处理 ioctl。
-    pub fn handle_ioctl(&self, cmd: VideoIoctl, arg: &mut [u8]) -> Result<()> {
+    pub fn handle_ioctl(
+        &self,
+        file: &Arc<VideoFile>,
+        cmd: VideoIoctl,
+        arg: &mut [u8],
+    ) -> Result<()> {
+        if needs_priority(cmd) {
+            self.check_priority(file)?;
+        }
         if let VideoIoctl::Modern(c) = cmd {
             match c {
                 IoctlCmd::SubscribeEvent => {
                     let sub: EventSubscription = unsafe { crate::ioctl::read_from_bytes(arg) };
                     let mut driver = self.driver.lock();
-                    let mut fh_guard = self.fh.lock();
-                    let fh = fh_guard.as_mut().ok_or(V4l2Error::BadFileDescriptor)?;
-                    driver.subscribe_event(fh, &sub)?;
+                    let mut fh = file.fh.lock();
+                    driver.subscribe_event(&mut fh, &sub)?;
                     if fh.pending() > 0 {
-                        self.event_poll_rx.wake_from_irq(IoEvents::PRI);
+                        unsafe { file.event_poll.wake(IoEvents::PRI) };
                     }
                     return Ok(());
                 }
                 IoctlCmd::UnsubscribeEvent => {
                     let sub: EventSubscription = unsafe { crate::ioctl::read_from_bytes(arg) };
                     let mut driver = self.driver.lock();
-                    let mut fh_guard = self.fh.lock();
-                    let fh = fh_guard.as_mut().ok_or(V4l2Error::BadFileDescriptor)?;
-                    driver.unsubscribe_event(fh, &sub)?;
+                    let mut fh = file.fh.lock();
+                    driver.unsubscribe_event(&mut fh, &sub)?;
                     return Ok(());
                 }
                 IoctlCmd::DQEvent => {
                     let mut ev: Event = unsafe { crate::ioctl::read_from_bytes(arg) };
                     let mut driver = self.driver.lock();
-                    let mut fh_guard = self.fh.lock();
-                    let fh = fh_guard.as_mut().ok_or(V4l2Error::BadFileDescriptor)?;
-                    driver.dqevent(fh, &mut ev)?;
+                    let mut fh = file.fh.lock();
+                    driver.dqevent(&mut fh, &mut ev)?;
                     unsafe { crate::ioctl::write_to_bytes(arg, &ev) };
                     return Ok(());
                 }
                 IoctlCmd::GPriority => {
-                    let fh_guard = self.fh.lock();
-                    let fh = fh_guard.as_ref().ok_or(V4l2Error::BadFileDescriptor)?;
-                    let p = fh.prio();
+                    let p = self.max_priority();
                     unsafe { crate::ioctl::write_to_bytes(arg, &p) };
                     return Ok(());
                 }
                 IoctlCmd::SPriority => {
                     let p: u32 = unsafe { crate::ioctl::read_from_bytes(arg) };
-                    if p > 3 {
+                    if !(1..=3).contains(&p) {
                         return Err(crate::V4l2Error::InvalidArgument);
                     }
-                    let mut fh_guard = self.fh.lock();
-                    let fh = fh_guard.as_mut().ok_or(V4l2Error::BadFileDescriptor)?;
-                    fh.set_prio(p);
+                    file.fh.lock().set_prio(p);
                     return Ok(());
-                }
-                IoctlCmd::DQBuf => {
-                    return self.handle_dqbuf_blocking(cmd, arg);
                 }
                 _ => {}
             }
         }
-        let mut driver = self.driver.lock();
-        let dispatcher = self.dispatcher.lock();
-        dispatcher.dispatch(&mut *driver, cmd, arg)
+        let queue_op = matches!(
+            cmd,
+            VideoIoctl::Modern(
+                IoctlCmd::ReqBufs
+                    | IoctlCmd::CreateBufs
+                    | IoctlCmd::PrepareBuf
+                    | IoctlCmd::RemoveBufs
+                    | IoctlCmd::ExpBuf
+                    | IoctlCmd::QBuf
+                    | IoctlCmd::DQBuf
+                    | IoctlCmd::StreamOn
+                    | IoctlCmd::StreamOff
+            )
+        );
+        let config_op = matches!(cmd, VideoIoctl::Modern(IoctlCmd::SFmt | IoctlCmd::SParm));
+        if config_op
+            && self
+                .sessions
+                .lock()
+                .owner
+                .as_ref()
+                .is_some_and(|owner| !owner.ptr_eq(&Arc::downgrade(file)))
+        {
+            return Err(V4l2Error::Busy);
+        }
+        let was_unowned = if queue_op {
+            let mut sessions = self.sessions.lock();
+            if sessions
+                .owner
+                .as_ref()
+                .is_some_and(|owner| !owner.ptr_eq(&Arc::downgrade(file)))
+            {
+                return Err(V4l2Error::Busy);
+            }
+            let vacant = sessions.owner.is_none();
+            if vacant {
+                // The weak owner does not extend this file's lifetime.
+                sessions.owner = Some(Arc::downgrade(file));
+            }
+            vacant
+        } else {
+            false
+        };
+        let result = {
+            let mut driver = self.driver.lock();
+            self.dispatcher.lock().dispatch(&mut *driver, cmd, arg)
+        };
+        if queue_op
+            && (result.is_err() && was_unowned
+                || result.is_ok()
+                    && matches!(cmd, VideoIoctl::Modern(IoctlCmd::ReqBufs))
+                    && arg.get(..4).is_some_and(|bytes| bytes == [0, 0, 0, 0]))
+        {
+            let mut sessions = self.sessions.lock();
+            if sessions
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.ptr_eq(&Arc::downgrade(file)))
+            {
+                sessions.owner = None;
+            }
+        }
+        result
     }
 
-    /// DQBuf 阻塞等待。
-    fn handle_dqbuf_blocking(&self, cmd: VideoIoctl, arg: &mut [u8]) -> Result<()> {
-        loop {
-            let result = {
-                let mut driver = self.driver.lock();
-                let dispatcher = self.dispatcher.lock();
-                dispatcher.dispatch(&mut *driver, cmd, arg)
-            };
-            match result {
-                Ok(()) => return Ok(()),
-                Err(e) if e == V4l2Error::WouldBlock || e == V4l2Error::Busy => {
-                    let poll_rx = match self.vb_poll_set() {
-                        Some(rx) => rx,
-                        None => return Err(e),
-                    };
-                    let wait = poll_fn(|cx| {
-                        if self.is_readable() || self.is_error() || !self.is_streaming() {
-                            return Poll::Ready(());
-                        }
-                        // SAFETY: ioctl 任务上下文；register 不持 VideoDevice 锁。
-                        unsafe { poll_rx.register(cx.waker(), IoEvents::IN | IoEvents::ERR) };
-                        if self.is_readable() || self.is_error() || !self.is_streaming() {
-                            Poll::Ready(())
-                        } else {
-                            Poll::Pending
-                        }
-                    });
-                    ax_task::future::block_on(wait);
-                }
-                Err(e) => return Err(e),
-            }
+    fn max_priority(&self) -> u32 {
+        self.sessions
+            .lock()
+            .files
+            .iter()
+            .filter_map(Weak::upgrade)
+            .map(|file| file.fh.lock().prio())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Reject configuration changes by a file below the current device priority.
+    pub fn check_priority(&self, file: &Arc<VideoFile>) -> Result<()> {
+        let local = file.fh.lock().prio();
+        if local < self.max_priority() {
+            Err(V4l2Error::Busy)
+        } else {
+            Ok(())
         }
     }
 
@@ -150,7 +219,11 @@ impl VideoDevice {
     }
 
     /// mmap 查询。
-    pub fn mmap(&self, offset: u64, length: u64) -> Option<(Vec<usize>, usize)> {
+    pub fn mmap(
+        &self,
+        offset: u64,
+        length: u64,
+    ) -> Option<(Vec<usize>, Arc<dyn Any + Send + Sync>)> {
         self.driver.lock().mmap(offset, length)
     }
 
@@ -174,45 +247,60 @@ impl VideoDevice {
         self.driver.lock().vb_poll_set()
     }
 
-    /// 获取事件唤醒源。
-    pub fn event_poll_set(&self) -> Arc<PollSet> {
-        Arc::clone(&self.event_poll_rx)
-    }
-
-    /// 打开设备。
-    pub fn open_fh(&self) {
-        let mut fh_guard = self.fh.lock();
-        if fh_guard.is_none() {
-            *fh_guard = Some(V4l2Fh::new());
+    /// Open a new description and acquire the hardware on the first open.
+    pub fn open_fh(&self, exclusive: bool) -> Result<Arc<VideoFile>> {
+        let mut sessions = self.sessions.lock();
+        sessions.files.retain(|file| file.strong_count() > 0);
+        if sessions.exclusive || (exclusive && !sessions.files.is_empty()) {
+            return Err(V4l2Error::Busy);
         }
-        drop(fh_guard);
-        self.open_count.fetch_add(1, Ordering::SeqCst);
+        if sessions.files.is_empty() {
+            self.driver.lock().open()?;
+        }
+        let file = Arc::new(VideoFile {
+            fh: Mutex::new(V4l2Fh::new()),
+            event_poll: Arc::new(PollSet::new()),
+        });
+        sessions.files.push(Arc::downgrade(&file));
+        sessions.exclusive = exclusive;
+        Ok(file)
     }
 
-    /// 关闭设备。
-    pub fn close_fh(&self) {
-        let prev = self.open_count.fetch_sub(1, Ordering::SeqCst);
-        if prev == 1 {
+    /// Close the description after its final descriptor reference is dropped.
+    pub fn close_fh(&self, file: &Arc<VideoFile>) {
+        let mut sessions = self.sessions.lock();
+        sessions
+            .files
+            .retain(|entry| !entry.ptr_eq(&Arc::downgrade(file)) && entry.strong_count() > 0);
+        let was_owner = sessions
+            .owner
+            .as_ref()
+            .is_some_and(|owner| owner.ptr_eq(&Arc::downgrade(file)));
+        if was_owner {
+            sessions.owner = None;
+        }
+        if sessions.files.is_empty() {
             self.driver.lock().release();
-            *self.fh.lock() = None;
-        } else if prev == 0 {
-            self.open_count.store(0, Ordering::SeqCst);
+            sessions.exclusive = false;
+        } else if was_owner {
+            self.driver.lock().close_owner();
         }
     }
 
     /// 投递事件。
-    pub fn queue_event(&self, ev: &mut Event) {
-        let mut fh_guard = self.fh.lock();
-        if let Some(fh) = &mut *fh_guard
-            && fh.queue_event(*ev) != QueueOutcome::NoSubscription
-        {
-            self.event_poll_rx.wake_from_irq(IoEvents::PRI);
+    pub fn queue_event(&self, ev: &Event) {
+        let files = self
+            .sessions
+            .lock()
+            .files
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        for file in files {
+            if file.fh.lock().queue_event(*ev) != QueueOutcome::NoSubscription {
+                unsafe { file.event_poll.wake(IoEvents::PRI) };
+            }
         }
-    }
-
-    /// 是否有待处理事件。
-    pub fn has_pending_events(&self) -> bool {
-        self.fh.lock().as_ref().is_some_and(|fh| fh.pending() > 0)
     }
 
     /// 处理 G_EXT_CTRLS。
@@ -240,9 +328,48 @@ impl VideoDevice {
         let mut controls = parse_ext_controls(payload)?;
         let driver = self.driver.lock();
         let handler = driver.ctrl_handler().ok_or(V4l2Error::NotSupported)?;
-        op(handler, header, &mut controls)?;
+        op(&handler.lock(), header, &mut controls)?;
         write_ext_controls(payload, &controls);
         Ok(())
+    }
+}
+
+fn needs_priority(cmd: VideoIoctl) -> bool {
+    match cmd {
+        VideoIoctl::Modern(cmd) => matches!(
+            cmd,
+            IoctlCmd::SFmt
+                | IoctlCmd::ReqBufs
+                | IoctlCmd::StreamOn
+                | IoctlCmd::StreamOff
+                | IoctlCmd::SParm
+                | IoctlCmd::SInput
+                | IoctlCmd::SOutput
+                | IoctlCmd::SEdid
+                | IoctlCmd::SSelection
+                | IoctlCmd::SPriority
+                | IoctlCmd::SExtCtrls
+                | IoctlCmd::SDvTimings
+                | IoctlCmd::CreateBufs
+                | IoctlCmd::RemoveBufs
+        ),
+        VideoIoctl::Legacy(cmd) => matches!(
+            cmd,
+            LegacyIoctlCmd::SFbuf
+                | LegacyIoctlCmd::Overlay
+                | LegacyIoctlCmd::SStd
+                | LegacyIoctlCmd::SCtrl
+                | LegacyIoctlCmd::STuner
+                | LegacyIoctlCmd::SAudio
+                | LegacyIoctlCmd::SAudioOut
+                | LegacyIoctlCmd::SModulator
+                | LegacyIoctlCmd::SFrequency
+                | LegacyIoctlCmd::SCrop
+                | LegacyIoctlCmd::SJpegComp
+                | LegacyIoctlCmd::EncoderCmd
+                | LegacyIoctlCmd::DecoderCmd
+                | LegacyIoctlCmd::SHwFreqSeek
+        ),
     }
 }
 

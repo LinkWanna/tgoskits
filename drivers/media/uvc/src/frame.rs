@@ -78,6 +78,7 @@ impl UvcPayloadHeader {
 pub(crate) struct FrameParser {
     last_fid: Option<bool>,
     filled: usize,
+    invalid: bool,
     synced: bool,
 }
 
@@ -87,6 +88,8 @@ pub(crate) enum PushOutcome {
     Pending,
     Completed { bytes: usize },
     CompletedAndRetry { bytes: usize },
+    Discarded,
+    DiscardedAndRetry,
 }
 
 impl FrameParser {
@@ -98,15 +101,24 @@ impl FrameParser {
     pub(crate) fn push_packet(&mut self, data: &[u8], dest: &mut [u8]) -> PushOutcome {
         let (hdr, hdr_len) = match UvcPayloadHeader::parse(data) {
             Some(v) => v,
-            None => return PushOutcome::Pending,
+            None => {
+                if self.synced {
+                    self.invalid = true;
+                }
+                return PushOutcome::Pending;
+            }
         };
 
         let fid = hdr.flag.contains(PayloadHeaderFlags::FID);
         let eof = hdr.flag.contains(PayloadHeaderFlags::EOF);
         let fid_toggle = self.last_fid.is_some_and(|last| last != fid);
-        if fid_toggle && self.filled > 0 {
-            let bytes = self.finish_frame();
-            return PushOutcome::CompletedAndRetry { bytes };
+        if fid_toggle && (self.filled > 0 || self.invalid) {
+            let (bytes, invalid) = self.finish_frame();
+            return if invalid {
+                PushOutcome::DiscardedAndRetry
+            } else {
+                PushOutcome::CompletedAndRetry { bytes }
+            };
         }
 
         if !self.synced {
@@ -121,24 +133,37 @@ impl FrameParser {
         }
         self.last_fid = Some(fid);
 
+        if hdr.flag.contains(PayloadHeaderFlags::ERR) {
+            self.invalid = true;
+        }
+
         let payload = &data[hdr_len..];
         let room = dest.len() - self.filled;
         let take = payload.len().min(room);
+        if take != payload.len() {
+            self.invalid = true;
+        }
         dest[self.filled..self.filled + take].copy_from_slice(&payload[..take]);
         self.filled += take;
 
-        if eof && self.filled > 0 {
-            let bytes = self.finish_frame();
-            return PushOutcome::Completed { bytes };
+        if eof && (self.filled > 0 || self.invalid) {
+            let (bytes, invalid) = self.finish_frame();
+            return if invalid {
+                PushOutcome::Discarded
+            } else {
+                PushOutcome::Completed { bytes }
+            };
         }
 
         PushOutcome::Pending
     }
 
-    fn finish_frame(&mut self) -> usize {
+    fn finish_frame(&mut self) -> (usize, bool) {
         let bytes = self.filled;
+        let invalid = self.invalid;
         self.filled = 0;
-        bytes
+        self.invalid = false;
+        (bytes, invalid)
     }
 }
 
@@ -201,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn full_buffer_truncates_and_waits_for_eof() {
+    fn full_buffer_discards_frame_at_eof() {
         let mut p = FrameParser::new();
         let mut dest = vec![0u8; 8];
         p.push_packet(&pkt(FID0, b"a"), &mut dest);
@@ -209,7 +234,7 @@ mod tests {
         assert_eq!(r, PushOutcome::Pending);
         assert_eq!(dest, b"\xFF\xD8123456");
         let r = p.push_packet(&pkt(FID1 | EOF, b"xy"), &mut dest);
-        assert_eq!(r, PushOutcome::Completed { bytes: 8 });
+        assert!(!matches!(r, PushOutcome::Completed { .. }));
     }
 
     #[test]

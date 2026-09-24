@@ -1,9 +1,13 @@
 //! UVC video stream.
 
 use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
-use core::task::{Context, Poll};
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    task::{Context, Poll},
+};
 
 use ax_media::videobuffer::{FrameGuard, VbMemOps, VbPoolLease};
+use ax_sync::Mutex;
 use crab_usb::{
     EndpointHandle,
     usb_if::{
@@ -19,6 +23,22 @@ use crate::{
 
 pub(crate) const ISO_BATCH: usize = 64;
 pub(crate) const ISO_DEPTH: usize = 3;
+
+pub(crate) struct IsoStop {
+    pub(crate) cancel: AtomicBool,
+    pub(crate) quiesced: AtomicBool,
+    pub(crate) submit_gate: Mutex<()>,
+}
+
+impl IsoStop {
+    pub(crate) fn new() -> Self {
+        Self {
+            cancel: AtomicBool::new(false),
+            quiesced: AtomicBool::new(false),
+            submit_gate: Mutex::new(()),
+        }
+    }
+}
 
 /// Pending ISO batch.
 #[derive(Clone)]
@@ -75,10 +95,16 @@ impl<M: VbMemOps> FrameAssembler<M> {
 
     pub(crate) fn process_batch(&mut self, data: &[u8], actuals: &[usize], packet_len: usize) {
         for (i, &actual) in actuals.iter().enumerate() {
-            if actual < 2 {
+            let Some(start) = i.checked_mul(packet_len) else {
+                break;
+            };
+            let Some(end) = start.checked_add(actual) else {
+                break;
+            };
+            if actual < 2 || actual > packet_len || end > data.len() {
                 continue;
             }
-            let pkt = &data[i * packet_len..i * packet_len + actual];
+            let pkt = &data[start..end];
             self.process_one_packet(pkt);
         }
     }
@@ -89,11 +115,29 @@ impl<M: VbMemOps> FrameAssembler<M> {
         let lease = &mut self.lease;
 
         let Some(mut guard) = lease.try_acquire() else {
+            // Resume only at a new FID boundary when userspace queues a buffer.
+            *parser = FrameParser::new();
             return;
         };
         match Self::push_with(parser, &mut guard, pkt) {
             PushOutcome::Pending => {}
             PushOutcome::Completed { bytes } => Self::commit_if_valid(guard, bytes, expected),
+            PushOutcome::Discarded => guard.abort(),
+            PushOutcome::DiscardedAndRetry => {
+                guard.abort();
+                if let Some(mut next_guard) = lease.try_acquire() {
+                    match Self::push_with(parser, &mut next_guard, pkt) {
+                        PushOutcome::Pending => {}
+                        PushOutcome::Completed { bytes } => {
+                            Self::commit_if_valid(next_guard, bytes, expected)
+                        }
+                        PushOutcome::Discarded => next_guard.abort(),
+                        PushOutcome::CompletedAndRetry { .. } | PushOutcome::DiscardedAndRetry => {
+                            unreachable!("parser must not retry twice")
+                        }
+                    }
+                }
+            }
             PushOutcome::CompletedAndRetry { bytes } => {
                 let valid = expected.is_none_or(|exp| bytes == exp);
                 if valid {
@@ -106,8 +150,12 @@ impl<M: VbMemOps> FrameAssembler<M> {
                             Self::commit_if_valid(next_guard, bytes, expected);
                         }
                         PushOutcome::Pending => {}
+                        PushOutcome::Discarded => next_guard.abort(),
                         PushOutcome::CompletedAndRetry { .. } => {
                             debug_assert!(false, "parser must not retry twice");
+                        }
+                        PushOutcome::DiscardedAndRetry => {
+                            unreachable!("parser must not retry twice")
                         }
                     }
                 } else {
@@ -118,10 +166,11 @@ impl<M: VbMemOps> FrameAssembler<M> {
                     );
                     match Self::push_with(parser, &mut guard, pkt) {
                         PushOutcome::Pending => {}
+                        PushOutcome::Discarded => guard.abort(),
                         PushOutcome::Completed { bytes } => {
                             Self::commit_if_valid(guard, bytes, expected);
                         }
-                        PushOutcome::CompletedAndRetry { .. } => {
+                        PushOutcome::CompletedAndRetry { .. } | PushOutcome::DiscardedAndRetry => {
                             unreachable!("parser must not retry twice")
                         }
                     }
@@ -161,6 +210,8 @@ struct ActiveSlot {
 
 pub(crate) struct IsoStream<H: UvcHandle> {
     handle: Arc<H>,
+    interface: u8,
+    stop: Arc<IsoStop>,
     endpoint: u8,
     packet_len: usize,
     batch: usize,
@@ -170,6 +221,8 @@ pub(crate) struct IsoStream<H: UvcHandle> {
 impl<H: UvcHandle> IsoStream<H> {
     pub(crate) fn new(
         handle: Arc<H>,
+        interface: u8,
+        stop: Arc<IsoStop>,
         endpoint: u8,
         packet_len: usize,
         batch: usize,
@@ -179,14 +232,26 @@ impl<H: UvcHandle> IsoStream<H> {
         let mut queue = VecDeque::with_capacity(depth);
         for _ in 0..depth {
             let mut buffer = vec![0u8; packet_len * batch];
-            let pending = handle.submit_endpoint_transfer(
+            let pending = match handle.submit_endpoint_transfer(
                 endpoint,
                 TransferRequest::iso_in(&mut buffer, &packet_lengths),
-            )?;
+            ) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    // An endpoint cancellation request does not retire DMA. Changing the
+                    // alternate setting stops the endpoint and retires every submitted TD.
+                    if handle.claim_interface(interface, 0).is_err() {
+                        core::mem::forget(queue);
+                    }
+                    return Err(error);
+                }
+            };
             queue.push_back(ActiveSlot { buffer, pending });
         }
         Ok(Self {
             handle,
+            interface,
+            stop,
             endpoint,
             packet_len,
             batch,
@@ -206,6 +271,10 @@ impl<H: UvcHandle> IsoStream<H> {
             Poll::Ready(Ok(actuals)) => {
                 let mut slot = self.queue.pop_front().unwrap();
                 assembler.process_batch(&slot.buffer, &actuals, self.packet_len);
+                let _gate = self.stop.submit_gate.lock();
+                if self.stop.cancel.load(Ordering::Acquire) {
+                    return Poll::Ready(Ok(()));
+                }
                 let packet_lengths = vec![self.packet_len; self.batch];
                 match self.handle.submit_endpoint_transfer(
                     self.endpoint,
@@ -227,6 +296,20 @@ impl<H: UvcHandle> IsoStream<H> {
     pub(crate) fn cancel_all(&self) {
         for slot in &self.queue {
             let _ = slot.pending.cancel();
+        }
+    }
+}
+
+impl<H: UvcHandle> Drop for IsoStream<H> {
+    fn drop(&mut self) {
+        if self.queue.is_empty() || self.stop.quiesced.load(Ordering::Acquire) {
+            return;
+        }
+        if self.handle.claim_interface(self.interface, 0).is_err() {
+            // The controller might still DMA into the queued buffers. Keep them allocated.
+            core::mem::forget(core::mem::take(&mut self.queue));
+        } else {
+            self.stop.quiesced.store(true, Ordering::Release);
         }
     }
 }

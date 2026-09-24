@@ -26,7 +26,6 @@ use axfs_ng_vfs::Filesystem;
 use axpoll::{ExclusiveRegistrationSink, IoEvents, Pollable, SharedRegistrationSink};
 use axpoll_set::PollSet;
 use crab_usb::usb_if::endpoint::{TransferCompletion, TransferRequest};
-use event_listener::Event as NotifyEvent;
 #[cfg(feature = "uvc")]
 pub(crate) use manager::{SubmittedTransfer, SubmittedTransferInner};
 
@@ -123,6 +122,8 @@ pub(crate) struct UsbDeviceSnapshotInfo {
     pub(crate) bus_num: u8,
     pub(crate) device_num: u8,
     pub(crate) descriptor_blob: Vec<u8>,
+    #[cfg(feature = "uvc")]
+    pub(crate) generation: u64,
 }
 
 pub(crate) struct UsbDeviceHandle {
@@ -176,13 +177,19 @@ pub(crate) fn usb_device_snapshots() -> Vec<UsbDeviceSnapshotInfo> {
     let mut snapshots = Vec::new();
     for bus_num in manager.bus_numbers() {
         for device_num in manager.device_numbers(bus_num) {
-            let Some(snapshot) = manager.device_snapshot(bus_num, device_num) else {
+            let Some((snapshot, generation)) =
+                manager.device_snapshot_with_generation(bus_num, device_num)
+            else {
                 continue;
             };
+            #[cfg(not(feature = "uvc"))]
+            let _ = generation;
             snapshots.push(UsbDeviceSnapshotInfo {
                 bus_num,
                 device_num,
                 descriptor_blob: snapshot.descriptor_blob,
+                #[cfg(feature = "uvc")]
+                generation,
             });
         }
     }
@@ -192,7 +199,19 @@ pub(crate) fn usb_device_snapshots() -> Vec<UsbDeviceSnapshotInfo> {
 pub(crate) fn acquire_usb_device(bus_num: u8, device_num: u8) -> StarryResult<UsbDeviceHandle> {
     let manager = manager().ok_or(StarryError::NoSuchDevice)?;
     manager
-        .acquire_device(bus_num, device_num)
+        .acquire_device(bus_num, device_num, Some("usb-serial"), None)
+        .map(|lease| UsbDeviceHandle { lease })
+}
+
+#[cfg(feature = "uvc")]
+pub(crate) fn acquire_usb_device_generation(
+    bus_num: u8,
+    device_num: u8,
+    generation: u64,
+) -> StarryResult<UsbDeviceHandle> {
+    let manager = manager().ok_or(StarryError::NoSuchDevice)?;
+    manager
+        .acquire_device(bus_num, device_num, Some("uvcvideo"), Some(generation))
         .map(|lease| UsbDeviceHandle { lease })
 }
 
@@ -361,7 +380,11 @@ impl UsbDeviceFile {
             return Ok(lease.clone());
         }
 
-        let new_lease = Arc::new(self.manager.acquire_device(self.bus_num, self.device_num)?);
+        let new_lease =
+            Arc::new(
+                self.manager
+                    .acquire_device(self.bus_num, self.device_num, None, None)?,
+            );
         *lease = Some(new_lease.clone());
         Ok(new_lease)
     }
@@ -503,8 +526,12 @@ impl UsbDeviceFile {
             return Err(StarryError::InvalidInput);
         }
 
+        let name = self
+            .manager
+            .kernel_driver_name(self.bus_num, self.device_num, get_driver.interface as u8)
+            .ok_or(StarryError::from(crate::Errno::ENODATA))?;
         get_driver.driver.fill(0);
-        get_driver.driver[..5].copy_from_slice(b"usbfs");
+        get_driver.driver[..name.len()].copy_from_slice(name.as_bytes());
         (arg as *mut descriptor::UsbdevfsGetDriver).vm_write(current, get_driver)?;
         Ok(0)
     }
@@ -519,7 +546,18 @@ impl UsbDeviceFile {
             return Err(StarryError::InvalidInput);
         }
         match command.ioctl_code as u32 {
-            descriptor::USBDEVFS_DISCONNECT | descriptor::USBDEVFS_CONNECT => Ok(0),
+            descriptor::USBDEVFS_DISCONNECT => {
+                if self
+                    .manager
+                    .kernel_driver_name(self.bus_num, self.device_num, command.ifno as u8)
+                    .is_some()
+                {
+                    Err(StarryError::ResourceBusy)
+                } else {
+                    Err(StarryError::from(crate::Errno::ENODATA))
+                }
+            }
+            descriptor::USBDEVFS_CONNECT => Err(StarryError::Unsupported),
             _ => Err(StarryError::Unsupported),
         }
     }
@@ -866,7 +904,9 @@ impl UsbDeviceFile {
                                 match submitted[index].poll_reclaim(cx) {
                                     Poll::Ready(result) => {
                                         ready.push((
-                                            submitted.remove(index).expect("submitted URB disappeared"),
+                                            submitted
+                                                .remove(index)
+                                                .expect("submitted URB disappeared"),
                                             result,
                                         ));
                                     }
@@ -1363,7 +1403,9 @@ impl FileLike for UsbDeviceFile {
                 Ok(0)
             }
             descriptor::USBDEVFS_IOCTL => self.kernel_driver_ioctl(current, arg),
-            descriptor::USBDEVFS_DISCONNECT | descriptor::USBDEVFS_CONNECT => Ok(0),
+            descriptor::USBDEVFS_DISCONNECT | descriptor::USBDEVFS_CONNECT => {
+                Err(StarryError::Unsupported)
+            }
             descriptor::USBDEVFS_DISCONNECT_CLAIM => self.disconnect_claim_ioctl(current, arg),
             descriptor::USBDEVFS_DISCARDURB => self.discard_urb(arg),
             descriptor::USBDEVFS_BULK => self.bulk_ioctl(current, arg),

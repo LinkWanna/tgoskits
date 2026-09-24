@@ -14,20 +14,19 @@
 //! 私有句柄即虚拟段基址（`as_ptr()` 暴露 CPU 直写地址）。供 vivid 及 CPU 搬运
 //! 场景（uvc 拼帧）。
 
-use alloc::{vec, vec::Vec};
-use core::ptr::NonNull;
+use alloc::{sync::Arc, vec, vec::Vec};
+use core::{any::Any, ptr::NonNull};
 
 use ax_alloc::{UsageKind, global_allocator};
+use ax_media::{
+    V4l2Error,
+    videobuffer::{MemPlane, VbMemOps},
+};
 use ax_memory_addr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange, align_up_4k};
 use ax_mm::kernel_aspace;
 use ax_runtime::hal::{
     mem::{phys_to_virt, virt_to_phys},
     paging::MappingFlags,
-};
-
-use crate::{
-    V4l2Error,
-    videobuffer::{MemPlane, VbMemOps},
 };
 
 /// 跟踪一个已分配 buffer 的虚拟段与物理页（自管，release 时归还）。
@@ -39,6 +38,15 @@ struct AllocEntry {
     pages: Vec<usize>,
 }
 
+impl Drop for AllocEntry {
+    fn drop(&mut self) {
+        let _ = kernel_aspace()
+            .lock()
+            .unmap(VirtAddr::from(self.vaddr), self.size);
+        free_frames(&self.pages);
+    }
+}
+
 /// 用于 V4L2 buffer 内存的 vmalloc 风格 allocator。
 ///
 /// 分配流程（每次 `alloc`）：在内核地址空间中找空闲虚拟段
@@ -47,7 +55,7 @@ struct AllocEntry {
 /// 逐页映射到虚拟段（虚拟连续、物理离散）。`mmap` 偏移按 stride
 /// （页对齐 plane 大小）在 alloc 时计算，buffer 间不重叠。
 pub struct VirtualAllocator {
-    entries: ax_sync::Mutex<Vec<AllocEntry>>,
+    entries: ax_sync::Mutex<Vec<Arc<AllocEntry>>>,
 }
 
 impl VirtualAllocator {
@@ -136,11 +144,11 @@ impl VbMemOps for VirtualAllocator {
             free_frames(&pages);
             return Err(V4l2Error::NoMemory);
         };
-        self.entries.lock().push(AllocEntry {
+        self.entries.lock().push(Arc::new(AllocEntry {
             vaddr,
             size: aligned,
             pages,
-        });
+        }));
         // 记录页对齐后的实际大小：用户态 mmap 的 length 是页对齐的，
         // 若记录未对齐的 size 会导致 mmap 越界检查（offset+length>end）
         // 误拒绝（Linux vb2 的 plane.length 同样是页对齐值）。
@@ -154,31 +162,25 @@ impl VbMemOps for VirtualAllocator {
 
     fn release(&self, planes: &[MemPlane]) {
         for plane in planes {
-            let addr = plane.addr();
-            // 摘除 entry（entries 锁只覆盖登记表窗口）。
             let entry = {
                 let mut entries = self.entries.lock();
-                let Some(pos) = entries.iter().position(|e| e.vaddr == addr) else {
+                let Some(pos) = entries.iter().position(|entry| entry.vaddr == plane.addr()) else {
                     continue;
                 };
                 entries.swap_remove(pos)
             };
-            // 摘除虚拟映射（aspace 锁只覆盖 unmap 窗口，不跨物理帧归还）。
-            let _ = kernel_aspace()
-                .lock()
-                .unmap(VirtAddr::from(entry.vaddr), entry.size);
-            // 归还物理帧（无锁）。
-            free_frames(&entry.pages);
+            // The VMA can retain another Arc; pages are freed by AllocEntry::drop.
+            drop(entry);
         }
     }
 
-    fn mmap(&self, plane: &MemPlane) -> Vec<usize> {
-        let addr = plane.addr();
-        let entries = self.entries.lock();
-        entries
+    fn mmap(&self, plane: &MemPlane) -> Option<(Vec<usize>, Arc<dyn Any + Send + Sync>)> {
+        let entry = self
+            .entries
+            .lock()
             .iter()
-            .find(|e| e.vaddr == addr)
-            .map(|e| e.pages.clone())
-            .unwrap_or_default()
+            .find(|entry| entry.vaddr == plane.addr())?
+            .clone();
+        Some((entry.pages.clone(), entry))
     }
 }

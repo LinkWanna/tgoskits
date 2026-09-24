@@ -6,6 +6,7 @@ use ax_media::{
     CtrlConfig, CtrlGetFn, CtrlSetFn, CtrlType,
     class::{CameraClassCtrl, CtrlClass, UserClassCtrl},
     interface::ctrl::CtrlFlags,
+    videobuffer::VbMemOps,
 };
 use crab_usb::usb_if::{
     host::ControlSetup,
@@ -18,7 +19,7 @@ use crate::{
 };
 
 /// Parsed VC units.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct VcUnits {
     pub camera_terminal_id: Option<u8>,
     pub camera_controls: Vec<u8>,
@@ -334,9 +335,9 @@ fn register_control<H: UvcHandle>(
             index: ((unit_id as u16) << 8) | vc_iface as u16,
         };
         match handle.control_in(setup, &mut buf) {
-            Ok(_) => buf[0],
-            Err(e) => {
-                log::debug!("uvc: {log_tag} {name} GetInfo err sel {sel_raw:#x}: {e:?}");
+            Ok(1) => buf[0],
+            other => {
+                log::debug!("uvc: {log_tag} {name} GetInfo err sel {sel_raw:#x}: {other:?}");
                 return;
             }
         }
@@ -362,7 +363,9 @@ fn register_control<H: UvcHandle>(
                 value: (sel_raw as u16) << 8,
                 index: ((unit_id as u16) << 8) | vc_iface as u16,
             };
-            handle.control_in(setup, &mut buf).ok()?;
+            if handle.control_in(setup, &mut buf).ok()? != size {
+                return None;
+            }
             decode_uvc_value(&buf)
         }
     };
@@ -377,8 +380,12 @@ fn register_control<H: UvcHandle>(
             value: (sel_raw as u16) << 8,
             index: ((unit_id as u16) << 8) | vc_iface as u16,
         };
-        h.control_in(setup, &mut buf)
-            .map_err(|_| ax_media::V4l2Error::Io)?;
+        if h.control_in(setup, &mut buf)
+            .map_err(|_| ax_media::V4l2Error::Io)?
+            != size
+        {
+            return Err(ax_media::V4l2Error::Io);
+        }
         let raw = decode_uvc_value(&buf).ok_or(ax_media::V4l2Error::Io)?;
         if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
             Ok(raw.trailing_zeros() as i64)
@@ -457,9 +464,10 @@ fn register_control<H: UvcHandle>(
     }
 }
 
-impl<H: UvcHandle> UvcDevice<H> {
-    pub(crate) fn register_controls(&mut self, units: &VcUnits) {
-        let _ = self.ctrls.new_ctrl(CtrlConfig {
+impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
+    pub(crate) fn register_controls(&self, units: &VcUnits) {
+        let mut ctrls = self.ctrls.lock();
+        let _ = ctrls.new_ctrl(CtrlConfig {
             id: (CtrlClass::User as u32) | 1,
             name: "User Controls",
             ctrl_type: CtrlType::CtrlClass,
@@ -471,7 +479,7 @@ impl<H: UvcHandle> UvcDevice<H> {
             qmenu: None,
             ops: None,
         });
-        let _ = self.ctrls.new_ctrl(CtrlConfig {
+        let _ = ctrls.new_ctrl(CtrlConfig {
             id: (CtrlClass::Camera as u32) | 1,
             name: "Camera Controls",
             ctrl_type: CtrlType::CtrlClass,
@@ -488,7 +496,7 @@ impl<H: UvcHandle> UvcDevice<H> {
         if let Some(unit_id) = units.processing_unit_id {
             for def in UVC_CONTROL_PU_DEFS {
                 register_control(
-                    &mut self.ctrls,
+                    &mut ctrls,
                     &self.handle,
                     vc_iface,
                     unit_id,
@@ -501,7 +509,7 @@ impl<H: UvcHandle> UvcDevice<H> {
         if let Some(unit_id) = units.camera_terminal_id {
             for def in UVC_CONTROL_CT_DEFS {
                 register_control(
-                    &mut self.ctrls,
+                    &mut ctrls,
                     &self.handle,
                     vc_iface,
                     unit_id,

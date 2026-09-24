@@ -8,6 +8,6 @@ mod allocator;
 mod buf;
 mod pool;
 
-pub use allocator::{VbMemOps, VirtualAllocator};
+pub use allocator::VbMemOps;
 pub use buf::{BufferState, MemPlane, Timestamp, VbBuffer};
 pub use pool::{FrameGuard, VbPool, VbPoolLease};

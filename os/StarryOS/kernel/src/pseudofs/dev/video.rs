@@ -4,11 +4,12 @@
 //! 并处理 ioctl ABI：从用户空间指针读取 C 结构体、
 //! 分发到 V4L2 ioctl 引擎，再写回结果。
 
-use alloc::{sync::Arc, vec, vec::Vec};
-use core::{any::Any, mem::MaybeUninit, task::Context};
+use alloc::{borrow::Cow, sync::Arc, vec, vec::Vec};
+use core::{any::Any, mem::MaybeUninit};
 
+use ax_fs_ng::vfs::{FileBackend, FileFlags};
 use ax_media::{
-    IoctlCmd, V4l2Error, VideoDevice, VideoIoctl,
+    IoctlCmd, V4l2Error, VideoDevice, VideoFile, VideoIoctl,
     interface::{
         ctrl::{ExtControl, ExtControls},
         event::Event,
@@ -16,12 +17,20 @@ use ax_media::{
 };
 use ax_memory_addr::PhysAddr;
 use axfs_ng_vfs::{NodeFlags, VfsError, VfsResult};
-use axpoll::{IoEvents, PollSet, Pollable};
-use starry_vm::{VmError, vm_read_slice, vm_write_slice};
+use axpoll::{ExclusiveRegistrationSink, IoEvents, Pollable, SharedRegistrationSink};
+use axpoll_set::PollSet;
+use linux_raw_sys::general::O_EXCL;
+use starry_vm::VmError;
 
 use crate::{
-    StarryError,
+    StarryError, StarryResult,
+    file::{File as KernelFile, FileLike, Kstat},
+    mm::{vm_read_slice, vm_write_slice},
     pseudofs::{DeviceMmap, DeviceOps},
+    task::{
+        UserTaskRef,
+        future::{block_on_user, poll_io},
+    },
 };
 
 /// 将用户内存访问错误映射为 VFS 错误（经 StarryError 桥接）。
@@ -34,7 +43,6 @@ pub struct V4l2DevNode {
     inner: Arc<VideoDevice>,
     event_source: Option<Arc<ax_sync::Mutex<Vec<Event>>>>,
     poll_rx: Option<Arc<PollSet>>,
-    event_poll_rx: Arc<PollSet>,
 }
 
 impl V4l2DevNode {
@@ -43,12 +51,10 @@ impl V4l2DevNode {
         // 之后 register 无需设备锁。事件唤醒源同理（设备构造时内建）。
         let inner = Arc::new(device);
         let poll_rx = inner.vb_poll_set();
-        let event_poll_rx = inner.event_poll_set();
         Self {
             inner,
             event_source,
             poll_rx,
-            event_poll_rx,
         }
     }
 
@@ -56,28 +62,9 @@ impl V4l2DevNode {
     pub fn from_input(device: VideoDevice, event_source: Arc<ax_sync::Mutex<Vec<Event>>>) -> Self {
         Self::new(device, Some(event_source))
     }
-
-    /// 将共享驱动事件队列中的事件投递到 fh（订阅过滤在框架内完成）。
-    fn drain_events(&self) {
-        if let Some(ref src) = self.event_source {
-            let events: Vec<Event> = core::mem::take(&mut *src.lock());
-            for mut ev in events {
-                self.inner.queue_event(&mut ev);
-            }
-        }
-    }
 }
 
 impl DeviceOps for V4l2DevNode {
-    fn open(&self, _exclusive: bool) -> VfsResult<()> {
-        self.inner.open_fh();
-        Ok(())
-    }
-
-    fn close(&self, _exclusive: bool) {
-        self.inner.close_fh();
-    }
-
     fn read_at(&self, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
         Err(VfsError::from(StarryError::InvalidInput))
     }
@@ -86,7 +73,74 @@ impl DeviceOps for V4l2DevNode {
         Err(VfsError::from(StarryError::InvalidInput))
     }
 
-    fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(&self, _current: &UserTaskRef, _cmd: u32, _arg: usize) -> VfsResult<usize> {
+        Err(VfsError::NotATty)
+    }
+
+    fn mmap(&self, offset: u64, length: u64) -> DeviceMmap {
+        if let Some((pages, retain)) = self.inner.mmap(offset, length) {
+            DeviceMmap::PhysicalPages(
+                pages.into_iter().map(PhysAddr::from_usize).collect(),
+                Some(retain),
+            )
+        } else {
+            DeviceMmap::None
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn flags(&self) -> NodeFlags {
+        NodeFlags::NON_CACHEABLE
+    }
+}
+
+pub(crate) fn is_video_device(inner: &dyn Any) -> bool {
+    inner.is::<V4l2DevNode>()
+}
+
+pub(crate) fn open_video_file(
+    inner: &dyn Any,
+    file: ax_fs_ng::File,
+    flags: u32,
+) -> StarryResult<Arc<dyn FileLike>> {
+    let node = inner
+        .downcast_ref::<V4l2DevNode>()
+        .ok_or(StarryError::NoSuchDevice)?;
+    let session = node
+        .inner
+        .open_fh(flags & O_EXCL != 0)
+        .map_err(map_v4l2_error)?;
+    Ok(Arc::new(V4l2File {
+        base: KernelFile::new(file, flags),
+        inner: Arc::clone(&node.inner),
+        session,
+        event_source: node.event_source.clone(),
+        poll_rx: node.poll_rx.clone(),
+    }))
+}
+
+/// A V4L2 file description; dup and fork share this session.
+struct V4l2File {
+    base: KernelFile,
+    inner: Arc<VideoDevice>,
+    session: Arc<VideoFile>,
+    event_source: Option<Arc<ax_sync::Mutex<Vec<Event>>>>,
+    poll_rx: Option<Arc<PollSet>>,
+}
+
+impl V4l2File {
+    fn drain_events(&self) {
+        if let Some(src) = &self.event_source {
+            for event in core::mem::take(&mut *src.lock()) {
+                self.inner.queue_event(&event);
+            }
+        }
+    }
+
+    fn ioctl_once(&self, current: &UserTaskRef, cmd: u32, arg: usize) -> VfsResult<usize> {
         let Some(ioctl) = VideoIoctl::try_from_u32(cmd) else {
             return Err(VfsError::from(StarryError::NotATty));
         };
@@ -107,7 +161,7 @@ impl DeviceOps for V4l2DevNode {
         // 栈上 1024B 数组在单核内核小栈下危险，且会截断大结构体。
         let mut buf_uninit: Vec<MaybeUninit<u8>> = vec![MaybeUninit::uninit(); size];
         if size > 0 && arg != 0 {
-            vm_read_slice(arg as *const u8, &mut buf_uninit).map_err(vm_to_vfs)?;
+            vm_read_slice(current, arg as *const u8, &mut buf_uninit).map_err(vm_to_vfs)?;
         }
         // MaybeUninit<u8> → u8：u8 无 drop，assume_init 安全。
         let mut buf: Vec<u8> = buf_uninit
@@ -119,17 +173,29 @@ impl DeviceOps for V4l2DevNode {
         if let VideoIoctl::Modern(ioctl_cmd) = ioctl {
             match ioctl_cmd {
                 IoctlCmd::GExtCtrls | IoctlCmd::SExtCtrls | IoctlCmd::TryExtCtrls => {
+                    if ioctl_cmd == IoctlCmd::SExtCtrls {
+                        self.inner
+                            .check_priority(&self.session)
+                            .map_err(map_v4l2_error)
+                            .map_err(VfsError::from)?;
+                    }
                     // 从已复制的参数缓冲中读取头
                     let mut header: ExtControls =
                         unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const ExtControls) };
                     let ec_count = header.count as usize;
+                    // Bound user controlled allocation before reading the pointed to array.
+                    if ec_count > 1024 {
+                        return Err(VfsError::InvalidInput);
+                    }
                     let ec_size = core::mem::size_of::<ExtControl>();
-                    let payload_size = ec_count * ec_size;
+                    let payload_size = ec_count
+                        .checked_mul(ec_size)
+                        .ok_or(VfsError::InvalidInput)?;
                     if payload_size > 0 {
                         // 从用户空间将控件数组读入堆缓冲。
                         let mut payload_uninit: Vec<MaybeUninit<u8>> =
                             vec![MaybeUninit::uninit(); payload_size];
-                        vm_read_slice(header.controls as *const u8, &mut payload_uninit)
+                        vm_read_slice(current, header.controls as *const u8, &mut payload_uninit)
                             .map_err(vm_to_vfs)?;
                         let mut payload: Vec<u8> = payload_uninit
                             .into_iter()
@@ -152,7 +218,7 @@ impl DeviceOps for V4l2DevNode {
                         match result {
                             Ok(()) => {
                                 // G/S/TRY 均回写控件数组（值可能被取整 / clamp）。
-                                vm_write_slice(header.controls as *mut u8, &payload)
+                                vm_write_slice(current, header.controls as *mut u8, &payload)
                                     .map_err(vm_to_vfs)?;
                                 // 同时回写头（error_idx / which 可能被设置）
                                 let header_bytes = unsafe {
@@ -161,7 +227,8 @@ impl DeviceOps for V4l2DevNode {
                                         core::mem::size_of::<ExtControls>(),
                                     )
                                 };
-                                vm_write_slice(arg as *mut u8, header_bytes).map_err(vm_to_vfs)?;
+                                vm_write_slice(current, arg as *mut u8, header_bytes)
+                                    .map_err(vm_to_vfs)?;
                                 self.drain_events();
                                 return Ok(0);
                             }
@@ -173,8 +240,9 @@ impl DeviceOps for V4l2DevNode {
                                         core::mem::size_of::<ExtControls>(),
                                     )
                                 };
-                                let _ = vm_write_slice(arg as *mut u8, header_bytes);
-                                let _ = vm_write_slice(header.controls as *mut u8, &payload);
+                                let _ = vm_write_slice(current, arg as *mut u8, header_bytes);
+                                let _ =
+                                    vm_write_slice(current, header.controls as *mut u8, &payload);
                                 return Err(VfsError::from(map_v4l2_error(err)));
                             }
                         }
@@ -201,7 +269,8 @@ impl DeviceOps for V4l2DevNode {
                                         core::mem::size_of::<ExtControls>(),
                                     )
                                 };
-                                vm_write_slice(arg as *mut u8, header_bytes).map_err(vm_to_vfs)?;
+                                vm_write_slice(current, arg as *mut u8, header_bytes)
+                                    .map_err(vm_to_vfs)?;
                                 self.drain_events();
                                 return Ok(0);
                             }
@@ -212,7 +281,7 @@ impl DeviceOps for V4l2DevNode {
                                         core::mem::size_of::<ExtControls>(),
                                     )
                                 };
-                                let _ = vm_write_slice(arg as *mut u8, header_bytes);
+                                let _ = vm_write_slice(current, arg as *mut u8, header_bytes);
                                 return Err(VfsError::from(map_v4l2_error(err)));
                             }
                         }
@@ -222,10 +291,13 @@ impl DeviceOps for V4l2DevNode {
             }
         }
 
-        match self.inner.handle_ioctl(ioctl, &mut buf[..size]) {
+        match self
+            .inner
+            .handle_ioctl(&self.session, ioctl, &mut buf[..size])
+        {
             Ok(()) => {
                 if size > 0 && arg != 0 {
-                    vm_write_slice(arg as *mut u8, &buf[..size]).map_err(vm_to_vfs)?;
+                    vm_write_slice(current, arg as *mut u8, &buf[..size]).map_err(vm_to_vfs)?;
                 }
                 self.drain_events();
                 Ok(0)
@@ -233,29 +305,80 @@ impl DeviceOps for V4l2DevNode {
             Err(err) => Err(VfsError::from(map_v4l2_error(err))),
         }
     }
+}
 
-    fn mmap(&self, offset: u64, length: u64) -> DeviceMmap {
-        if let Some((pages, _size)) = self.inner.mmap(offset, length) {
-            DeviceMmap::PhysicalPages(pages.into_iter().map(PhysAddr::from_usize).collect(), None)
-        } else {
-            DeviceMmap::None
-        }
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_pollable(&self) -> Option<&dyn Pollable> {
-        Some(self)
-    }
-
-    fn flags(&self) -> NodeFlags {
-        NodeFlags::NON_CACHEABLE
+impl Drop for V4l2File {
+    fn drop(&mut self) {
+        self.inner.close_fh(&self.session);
     }
 }
 
-impl Pollable for V4l2DevNode {
+impl FileLike for V4l2File {
+    fn validate_write_access(&self) -> StarryResult {
+        self.base.validate_write_access()
+    }
+
+    fn stat(&self) -> StarryResult<Kstat> {
+        self.base.stat()
+    }
+
+    fn path(&self) -> Cow<'_, str> {
+        self.base.path()
+    }
+
+    fn file_mmap(&self) -> StarryResult<(FileBackend, FileFlags)> {
+        self.base.file_mmap()
+    }
+
+    fn device_mmap(&self, offset: u64, length: u64) -> StarryResult<DeviceMmap> {
+        Ok(self
+            .inner
+            .mmap(offset, length)
+            .map(|(pages, retain)| {
+                DeviceMmap::PhysicalPages(
+                    pages.into_iter().map(PhysAddr::from_usize).collect(),
+                    Some(retain),
+                )
+            })
+            .unwrap_or(DeviceMmap::None))
+    }
+
+    fn ioctl(&self, current: &UserTaskRef, cmd: u32, arg: usize) -> StarryResult<usize> {
+        let is_dqbuf = matches!(
+            VideoIoctl::try_from_u32(cmd),
+            Some(VideoIoctl::Modern(IoctlCmd::DQBuf))
+        );
+        if is_dqbuf {
+            block_on_user(
+                current,
+                poll_io(
+                    self,
+                    IoEvents::IN | IoEvents::ERR,
+                    self.nonblocking(),
+                    || {
+                        self.ioctl_once(current, cmd, arg)
+                            .map_err(StarryError::from)
+                    },
+                ),
+            )
+            .into_result()?
+        } else {
+            Ok(self.ioctl_once(current, cmd, arg)?)
+        }
+    }
+
+    fn open_flags(&self) -> u32 {
+        self.base.open_flags()
+    }
+    fn nonblocking(&self) -> bool {
+        self.base.nonblocking()
+    }
+    fn set_nonblocking(&self, value: bool) -> StarryResult {
+        self.base.set_nonblocking(value)
+    }
+}
+
+impl Pollable for V4l2File {
     fn poll(&self) -> IoEvents {
         let mut events = IoEvents::empty();
         if self.inner.is_readable() {
@@ -264,23 +387,40 @@ impl Pollable for V4l2DevNode {
         if self.inner.is_error() {
             events |= IoEvents::ERR;
         }
-        if self.inner.has_pending_events() {
+        if self.session.has_pending_events() {
             events |= IoEvents::PRI;
         }
         events
     }
 
-    fn register(&self, context: &mut Context<'_>, events: IoEvents) {
-        let Some(poll_rx) = &self.poll_rx else {
-            context.waker().wake_by_ref();
-            return;
-        };
-        let interests = events & (IoEvents::IN | IoEvents::ERR);
-        if !interests.is_empty() {
-            unsafe { poll_rx.register(context.waker(), interests) }
+    unsafe fn register_shared(&self, sink: &mut dyn SharedRegistrationSink, events: IoEvents) {
+        if let Some(poll_rx) = &self.poll_rx {
+            let interests = events & (IoEvents::IN | IoEvents::ERR);
+            if !interests.is_empty() {
+                unsafe { sink.register_shared(poll_rx, interests) };
+            }
         }
-        if !(events & IoEvents::PRI).is_empty() {
-            unsafe { self.event_poll_rx.register(context.waker(), IoEvents::PRI) }
+        if events.contains(IoEvents::PRI) {
+            unsafe { sink.register_shared(self.session.event_poll_set(), IoEvents::PRI) };
+        }
+    }
+
+    unsafe fn register_exclusive(
+        &self,
+        sink: &mut dyn ExclusiveRegistrationSink,
+        events: IoEvents,
+    ) {
+        if let Some(poll_rx) = &self.poll_rx {
+            let interests = events & (IoEvents::IN | IoEvents::ERR);
+            if !interests.is_empty() {
+                unsafe { sink.register_exclusive(poll_rx, interests) };
+            }
+        }
+        if events.contains(IoEvents::PRI) {
+            unsafe {
+                sink.as_shared()
+                    .register_shared(self.session.event_poll_set(), IoEvents::PRI)
+            };
         }
     }
 }

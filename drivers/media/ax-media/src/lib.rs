@@ -16,7 +16,7 @@ mod ioctl;
 pub mod videobuffer;
 
 pub use ctrls::{CtrlConfig, CtrlGetFn, CtrlHandler, CtrlOps, CtrlSetFn, CtrlType, class};
-pub use device::VideoDevice;
+pub use device::{VideoDevice, VideoFile};
 pub use driver::V4L2DriverOps;
 pub use error::{Result, V4l2Error};
 pub use filehandler::V4l2Fh;

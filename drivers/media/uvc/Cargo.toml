@@ -8,8 +8,7 @@ license.workspace = true
 ax-media = { workspace = true }
 crab-usb = { workspace = true }
 ax-sync = { workspace = true, features = ["sleep"] }
-ax-task = { workspace = true }
-axpoll = { workspace = true }
+axpoll-set = { workspace = true }
 log = { workspace = true }
 anyhow = { workspace = true }
 bitflags = { workspace = true }

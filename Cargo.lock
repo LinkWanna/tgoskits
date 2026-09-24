@@ -1083,13 +1083,9 @@ dependencies = [
 name = "ax-media"
 version = "0.1.0"
 dependencies = [
- "ax-alloc",
- "ax-memory-addr",
- "ax-mm",
- "ax-runtime",
  "ax-sync",
- "ax-task",
  "axpoll",
+ "axpoll-set",
  "bitflags 2.13.2",
  "log",
  "thiserror 2.0.20",
@@ -5162,8 +5158,7 @@ dependencies = [
  "anyhow",
  "ax-media",
  "ax-sync",
- "ax-task",
- "axpoll",
+ "axpoll-set",
  "bitflags 2.13.2",
  "crab-usb",
  "log",

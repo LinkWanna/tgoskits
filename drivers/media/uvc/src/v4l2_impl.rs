@@ -1,6 +1,7 @@
 //! UVC V4L2 ioctl dispatch.
 
 use alloc::{sync::Arc, vec::Vec};
+use core::any::Any;
 
 use ax_media::{
     IoctlOps, LegacyIoctlOps, V4L2DriverOps, V4l2Error, V4l2Fh,
@@ -16,9 +17,9 @@ use ax_media::{
         },
         stream::{StreamParm, StreamParmCap, StreamParmMode},
     },
-    videobuffer::BufferState,
+    videobuffer::{BufferState, VbMemOps},
 };
-use axpoll::PollSet;
+use axpoll_set::PollSet;
 use log::*;
 
 use crate::{FrameIntervals, UvcDevice, UvcHandle, VideoFormat};
@@ -27,8 +28,21 @@ use crate::{FrameIntervals, UvcDevice, UvcHandle, VideoFormat};
 const PIX_FMT_MJPEG: u32 = 0x47504a4d;
 const PIX_FMT_YUYV: u32 = 0x56595559;
 
-impl<H: UvcHandle> V4L2DriverOps for UvcDevice<H> {
-    fn mmap(&self, offset: u64, length: u64) -> Option<(Vec<usize>, usize)> {
+impl<H: UvcHandle, M: VbMemOps + 'static> V4L2DriverOps for UvcDevice<H, M> {
+    fn open(&self) -> ax_media::Result<()> {
+        self.handle
+            .claim_interface(self.vc_iface_num, 0)
+            .map_err(|_| V4l2Error::Busy)?;
+        if let Err(error) = self.handle.claim_interface(self.vs_iface_num, 0) {
+            let _ = self.handle.release_interface(self.vc_iface_num);
+            log::warn!("[UVC] failed to claim VS interface: {error:?}");
+            return Err(V4l2Error::Busy);
+        }
+        self.register_controls(&self.vc_units);
+        Ok(())
+    }
+
+    fn mmap(&self, offset: u64, length: u64) -> Option<(Vec<usize>, Arc<dyn Any + Send + Sync>)> {
         self.pool.mmap(offset, length)
     }
 
@@ -55,16 +69,25 @@ impl<H: UvcHandle> V4L2DriverOps for UvcDevice<H> {
     fn release(&self) {
         self.close_stream();
         self.pool.streamoff();
+        let _ = self.pool.reqbufs(0, &[]);
+        let _ = self.handle.release_interface(self.vs_iface_num);
+        let _ = self.handle.release_interface(self.vc_iface_num);
     }
 
-    fn ctrl_handler(&self) -> Option<&ax_media::CtrlHandler> {
-        Some(&self.ctrls)
+    fn close_owner(&self) {
+        self.close_stream();
+        self.pool.streamoff();
+        let _ = self.pool.reqbufs(0, &[]);
+    }
+
+    fn ctrl_handler(&self) -> Option<Arc<ax_sync::Mutex<ax_media::CtrlHandler>>> {
+        Some(self.ctrls.clone())
     }
 }
 
-impl<H: UvcHandle> LegacyIoctlOps for UvcDevice<H> {}
+impl<H: UvcHandle, M: VbMemOps + 'static> LegacyIoctlOps for UvcDevice<H, M> {}
 
-impl<H: UvcHandle> IoctlOps for UvcDevice<H> {
+impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
     fn querycap(&self, cap: &mut Capability) -> ax_media::Result<()> {
         let driver = b"uvc\0\0\0\0\0\0\0\0\0\0\0\0\0";
         let card = b"Starry UVC Camera\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
@@ -235,6 +258,9 @@ impl<H: UvcHandle> IoctlOps for UvcDevice<H> {
     fn s_fmt(&mut self, f: &mut Format) -> ax_media::Result<()> {
         if f.ty != BufType::VideoCapture {
             return Err(V4l2Error::InvalidArgument);
+        }
+        if self.pool.num_buffers() != 0 {
+            return Err(V4l2Error::Busy);
         }
         // SAFETY: `f.ty` is VideoCapture, so `pix` is active.
         let pix = unsafe { f.fmt.pix };
@@ -502,13 +528,9 @@ impl<H: UvcHandle> IoctlOps for UvcDevice<H> {
         let requested_interval = Fract::new(req.numerator, req.denominator).to_interval();
 
         let (best_pos, negotiated) = self.find_interval(requested_interval);
-        let result_fract = Fract::from_interval(negotiated);
-
-        // 更新 active_format，由于实际的图像格式不变，不需要重新 s_fmt
-        if best_pos != self.active_format {
-            self.active_format = best_pos;
-        }
-        *self.cur_frame_interval.lock() = negotiated;
+        self.probe_format(self.formats[best_pos].clone(), Some(negotiated))
+            .map_err(|_| V4l2Error::Io)?;
+        let result_fract = Fract::from_interval(*self.cur_frame_interval.lock());
 
         p.parm.raw_data = [0; 200];
         // SAFETY: `p.ty` is VideoCapture, so `capture` is active.
@@ -567,6 +589,6 @@ impl<H: UvcHandle> IoctlOps for UvcDevice<H> {
         fh: &mut V4l2Fh,
         sub: &EventSubscription,
     ) -> ax_media::Result<()> {
-        self.ctrls.subscribe_event(fh, sub)
+        self.ctrls.lock().subscribe_event(fh, sub)
     }
 }

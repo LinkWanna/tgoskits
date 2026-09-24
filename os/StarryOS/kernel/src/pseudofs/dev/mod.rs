@@ -46,7 +46,11 @@ mod cvi_vdec;
 #[cfg(feature = "uvc")]
 mod uvc_camera;
 #[cfg(feature = "uvc")]
-mod video;
+pub(crate) mod video;
+#[cfg(feature = "uvc")]
+mod video_allocator;
+#[cfg(feature = "uvc")]
+mod video_dir;
 
 use alloc::{format, sync::Arc};
 use core::{
@@ -66,6 +70,8 @@ pub use log::bind_dev_log;
 use rand::{Rng, SeedableRng, rngs::ChaCha20Rng};
 
 use crate::pseudofs::{Device, DeviceOps, DirMaker, DirMapping, SimpleDir, SimpleFile, SimpleFs};
+#[cfg(feature = "uvc")]
+use crate::pseudofs::SimpleDirOps;
 
 const RANDOM_SEED_STEP: u64 = 0x9e37_79b9_7f4a_7c15;
 
@@ -829,35 +835,13 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     }
     #[cfg(feature = "uvc")]
     {
-        let mut video_idx = 0u32;
-        for snap in uvc_camera::collect_uvc_snapshots() {
-            match uvc_camera::create_camera_driver(&snap) {
-                Ok(cam_driver) => {
-                    let events = cam_driver.event_source();
-                    let driver: Arc<ax_sync::Mutex<dyn ax_media::V4L2DriverOps>> =
-                        Arc::new(ax_sync::Mutex::new(cam_driver));
-                    let vdev = ax_media::VideoDevice::new(driver, "uvc");
-                    root.add(
-                        format!("video{video_idx}"),
-                        Device::new(
-                            fs.clone(),
-                            NodeType::CharacterDevice,
-                            DeviceId::new(81, video_idx),
-                            Arc::new(video::V4l2DevNode::from_input(vdev, events)),
-                        ),
-                    );
-                    video_idx += 1;
-                }
-                Err(err) => {
-                    warn!(
-                        "uvc: failed to create camera driver for bus {} dev {}: {:?}",
-                        snap.bus_num, snap.device_num, err
-                    );
-                }
-            }
-        }
+        SimpleDir::new_maker(fs.clone(), Arc::new(root.chain(video_dir::UvcVideoDir::new(fs))))
     }
-    SimpleDir::new_maker(fs, Arc::new(root))
+
+    #[cfg(not(feature = "uvc"))]
+    {
+        SimpleDir::new_maker(fs, Arc::new(root))
+    }
 }
 
 fn descriptor_symlink(fs: Arc<SimpleFs>, target: &'static str) -> Arc<SimpleFile> {

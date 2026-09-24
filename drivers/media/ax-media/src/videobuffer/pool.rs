@@ -9,9 +9,11 @@
 //! * `VbPoolLease`：驱动从 `VbPool` 获取的安全读写租约，`Drop` 自动 `abort`
 
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use core::any::Any;
 
 use ax_sync::Mutex;
-use axpoll::{IoEvents, PollSet};
+use axpoll::IoEvents;
+use axpoll_set::PollSet;
 
 use super::{
     allocator::VbMemOps,
@@ -26,6 +28,7 @@ pub(crate) struct VbPoolInner {
     done_queue: VecDeque<u32>,
 
     sequence: u32,
+    generation: u64,
     streaming: bool,
     error: bool,
 }
@@ -37,22 +40,25 @@ pub struct VbPool<M: VbMemOps> {
     pub(crate) state: Mutex<VbPoolInner>,
     pub(crate) poll_set: Arc<PollSet>,
     allocator: M,
+    monotonic_nanos: fn() -> u64,
     min_buffers: u32,
     max_buffers: u32,
 }
 
 impl<M: VbMemOps> VbPool<M> {
-    pub fn new(alloc: M, min_buffers: u32, max_buffers: u32) -> Self {
+    pub fn new(alloc: M, min_buffers: u32, max_buffers: u32, monotonic_nanos: fn() -> u64) -> Self {
         Self {
             state: Mutex::new(VbPoolInner {
                 buffers: Vec::new(),
                 ready_queue: VecDeque::new(),
                 done_queue: VecDeque::new(),
                 sequence: 0,
+                generation: 0,
                 streaming: false,
                 error: false,
             }),
             allocator: alloc,
+            monotonic_nanos,
             poll_set: Arc::new(PollSet::new()),
             min_buffers,
             max_buffers,
@@ -60,26 +66,30 @@ impl<M: VbMemOps> VbPool<M> {
     }
 
     // ── mmap ───────────────────────────────────────────────────────
-    pub fn mmap(&self, offset: u64, length: u64) -> Option<(Vec<usize>, usize)> {
+    pub fn mmap(
+        &self,
+        offset: u64,
+        length: u64,
+    ) -> Option<(Vec<usize>, Arc<dyn Any + Send + Sync>)> {
+        if length == 0 {
+            return None;
+        }
         let inner = self.state.lock();
         for vb in inner.buffers.iter() {
             let plane = vb.planes.first()?;
             let base = plane.offset as u64;
             let end = base + plane.length as u64;
             if offset >= base && offset < end {
-                if offset + length > end {
+                if offset.checked_add(length)? > end {
                     return None;
                 }
                 let sub = (offset - base) as usize;
                 let page = 4096usize;
                 let first_page = sub / page;
                 let n_pages = (sub % page + length as usize).div_ceil(page);
-                let all = self.allocator.mmap(plane);
-                let addrs = all
-                    .get(first_page..first_page + n_pages)
-                    .unwrap_or_default()
-                    .to_vec();
-                return Some((addrs, length as usize));
+                let (all, retain) = self.allocator.mmap(plane)?;
+                let addrs = all.get(first_page..first_page + n_pages)?.to_vec();
+                return Some((addrs, retain));
             }
         }
         None
@@ -102,46 +112,19 @@ impl<M: VbMemOps> VbPool<M> {
         self.state.lock().streaming
     }
 
-    /// 置错误并回收孤儿 `Active && driver_owned` 为 `Error` 入 `done_queue`。
+    /// Signal an error while preserving ownership of every live frame lease.
     pub fn set_error(&self) {
-        let mut inner = self.state.lock();
-        inner.error = true;
-        let orphan: Vec<u32> = inner
-            .buffers
-            .iter()
-            .enumerate()
-            .filter_map(|(i, vb)| {
-                if vb.state == BufferState::Active {
-                    Some(i as u32)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let reclaimed = orphan.len();
-        for idx in orphan {
-            inner.sequence += 1;
-            let seq = inner.sequence;
-            {
-                let vb = &mut inner.buffers[idx as usize];
-                vb.state = BufferState::Error;
-                vb.bytesused = 0;
-                vb.timestamp = Timestamp::Monotonic(ax_runtime::hal::time::monotonic_time_nanos());
-                vb.sequence = seq;
-            }
-            inner.done_queue.push_back(idx);
-        }
-        drop(inner);
-        if reclaimed > 0 {
-            self.poll_set.wake_from_irq(IoEvents::IN | IoEvents::ERR);
-        } else {
-            self.poll_set.wake_from_irq(IoEvents::ERR);
-        }
+        self.state.lock().error = true;
+        unsafe { self.poll_set.wake(IoEvents::ERR) };
     }
 
     // ── 驱动侧：VbPoolLease ─────────────────────────────────────────────
     pub(crate) fn acquire_frame(&self) -> Option<ActiveFrame> {
         let mut inner = self.state.lock();
+        if inner.error || !inner.streaming {
+            return None;
+        }
+        let generation = inner.generation;
         for (idx, vb) in inner.buffers.iter_mut().enumerate() {
             if vb.state == BufferState::Ready {
                 let plane = vb.planes.first()?;
@@ -151,6 +134,7 @@ impl<M: VbMemOps> VbPool<M> {
                 vb.state = BufferState::Active;
                 return Some(ActiveFrame {
                     buffer_index: idx as u32,
+                    generation,
                     data_ptr: plane.as_ptr(),
                     len: plane.length as usize,
                 });
@@ -167,26 +151,33 @@ impl<M: VbMemOps> VbPool<M> {
     }
 
     fn commit_frame(&self, frame: ActiveFrame, bytesused: u32) {
-        self.commit_inner(frame.buffer_index, bytesused, BufferState::Done)
+        self.commit_inner(frame, bytesused, BufferState::Done)
     }
 
     fn abort_frame(&self, frame: ActiveFrame) {
-        self.commit_inner(frame.buffer_index, 0, BufferState::Error)
+        self.commit_inner(frame, 0, BufferState::Error)
     }
 
-    fn commit_inner(&self, index: u32, bytesused: u32, state: BufferState) {
-        let mut guard = self.state.lock();
-        let inner = &mut *guard;
-        // 内部路径保证：index 来自已 `Active` 的租约，state 仅为 Done/Error
-        let vb = &mut inner.buffers[index as usize];
-        vb.bytesused = bytesused;
-        vb.timestamp = Timestamp::Monotonic(ax_runtime::hal::time::monotonic_time_nanos());
+    fn commit_inner(&self, frame: ActiveFrame, bytesused: u32, state: BufferState) {
+        let mut inner = self.state.lock();
+        if frame.generation != inner.generation {
+            return;
+        }
+        let error = inner.error;
+        let Some(vb) = inner.buffers.get_mut(frame.buffer_index as usize) else {
+            return;
+        };
+        if vb.state != BufferState::Active {
+            return;
+        }
+        vb.bytesused = if error { 0 } else { bytesused };
+        vb.timestamp = Timestamp::Monotonic((self.monotonic_nanos)());
+        vb.state = if error { BufferState::Error } else { state };
         inner.sequence += 1;
-        vb.sequence = inner.sequence;
-        vb.state = state;
-        inner.done_queue.push_back(index);
-        drop(guard);
-        self.poll_set.wake_from_irq(IoEvents::IN);
+        inner.buffers[frame.buffer_index as usize].sequence = inner.sequence;
+        inner.done_queue.push_back(frame.buffer_index);
+        drop(inner);
+        unsafe { self.poll_set.wake(IoEvents::IN | IoEvents::ERR) };
     }
 }
 
@@ -203,6 +194,7 @@ impl<M: VbMemOps> VbPool<M> {
             return Err(V4l2Error::Busy);
         }
         if count == 0 {
+            inner.generation = inner.generation.wrapping_add(1);
             for vb in inner.buffers.drain(..) {
                 self.allocator.release(&vb.planes);
             }
@@ -240,6 +232,7 @@ impl<M: VbMemOps> VbPool<M> {
         inner.ready_queue.clear();
         inner.done_queue.clear();
         inner.sequence = 0;
+        inner.generation = inner.generation.wrapping_add(1);
         inner.buffers = tmp;
         Ok(())
     }
@@ -304,6 +297,7 @@ impl<M: VbMemOps> VbPool<M> {
 
     pub fn streamoff(&self) {
         let mut inner = self.state.lock();
+        inner.generation = inner.generation.wrapping_add(1);
         for vb in &mut inner.buffers {
             if vb.state != BufferState::Free {
                 vb.state = BufferState::Free;
@@ -314,7 +308,7 @@ impl<M: VbMemOps> VbPool<M> {
         inner.ready_queue.clear();
         inner.done_queue.clear();
         drop(inner);
-        self.poll_set.wake_from_irq(IoEvents::IN | IoEvents::ERR);
+        unsafe { self.poll_set.wake(IoEvents::IN | IoEvents::ERR) };
     }
 
     pub fn buffer_snapshot(&self, index: u32) -> Option<VbBuffer> {

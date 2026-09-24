@@ -487,6 +487,12 @@ fn parse_frame_descriptor(
         Ok(frame_desc) => {
             let intervals = if frame_desc.frame_interval_type == 0 {
                 if frame_desc.frame_intervals.len() >= 3 {
+                    if frame_desc.frame_intervals[0] == 0
+                        || frame_desc.frame_intervals[1] < frame_desc.frame_intervals[0]
+                        || frame_desc.frame_intervals[2] == 0
+                    {
+                        return Err(USBError::InvalidParameter);
+                    }
                     FrameIntervals::Continuous {
                         min: frame_desc.frame_intervals[0],
                         max: frame_desc.frame_intervals[1],
@@ -498,25 +504,29 @@ fn parse_frame_descriptor(
             } else {
                 FrameIntervals::Discrete(frame_desc.frame_intervals.clone())
             };
+            if matches!(&intervals, FrameIntervals::Discrete(values) if values.contains(&0)) {
+                return Err(USBError::InvalidParameter);
+            }
+            let pixels = u32::from(frame_desc.width)
+                .checked_mul(u32::from(frame_desc.height))
+                .filter(|pixels| *pixels != 0)
+                .ok_or(USBError::InvalidParameter)?;
             let max_frame_size = match format_type {
-                VideoFormatType::Uncompressed(t) => {
-                    let w = frame_desc.width as u32;
-                    let h = frame_desc.height as u32;
-                    match t {
-                        UncompressedFormat::Yuyv | UncompressedFormat::Uyvy => w * h * 2,
-                        UncompressedFormat::Nv12 => w * h * 3 / 2,
-                        UncompressedFormat::Grey => w * h,
-                        UncompressedFormat::Bgr24 => w * h * 3,
-                        UncompressedFormat::Xbgr32 => w * h * 4,
-                    }
+                VideoFormatType::Uncompressed(t) => match t {
+                    UncompressedFormat::Yuyv | UncompressedFormat::Uyvy => pixels.checked_mul(2),
+                    UncompressedFormat::Nv12 => pixels.checked_mul(3).map(|bytes| bytes / 2),
+                    UncompressedFormat::Grey => Some(pixels),
+                    UncompressedFormat::Bgr24 => pixels.checked_mul(3),
+                    UncompressedFormat::Xbgr32 => pixels.checked_mul(4),
                 }
+                .ok_or(USBError::InvalidParameter)?,
                 VideoFormatType::Mjpeg => {
                     let v = frame_desc.max_video_frame_buffer_size;
                     if v != 0 {
                         v
                     } else {
                         // UVC 1.1+ 的 frame-based/无效描述符回退
-                        (frame_desc.width as u32) * (frame_desc.height as u32) * 2
+                        pixels.checked_mul(2).ok_or(USBError::InvalidParameter)?
                     }
                 }
             };
@@ -632,6 +642,11 @@ mod tests {
         assert_eq!(cfg.vc_units.camera_controls, vec![0x02]);
         assert_eq!(cfg.vc_units.processing_unit_id, Some(2));
         assert_eq!(cfg.vc_units.processing_controls, vec![0x04]);
+
+        // A device-level class of zero delegates classification to its interfaces.
+        let mut interface_class_device = blob;
+        interface_class_device[4..7].fill(0);
+        assert!(parse_uvc_device(&interface_class_device).is_ok());
     }
 
     #[test]
