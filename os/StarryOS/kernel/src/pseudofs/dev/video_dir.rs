@@ -5,7 +5,46 @@ use alloc::{borrow::Cow, boxed::Box, format, sync::Arc, vec::Vec};
 use axfs_ng_vfs::{DeviceId, NodeType, VfsError, VfsResult};
 
 use super::{uvc_camera, video};
-use crate::pseudofs::{Device, NodeOpsMux, SimpleDirOps, SimpleFs, usbfs::UsbDeviceSnapshotInfo};
+use crate::pseudofs::{
+    Device, DirMapping, NodeOpsMux, SimpleDirOps, SimpleFs, usbfs::UsbDeviceSnapshotInfo,
+};
+
+/// Keep the static `/dev` entries stable for nested mounts while resolving
+/// camera entries against the current USB topology.
+pub(super) struct UvcDevRoot {
+    static_entries: DirMapping,
+    cameras: UvcVideoDir,
+}
+
+impl UvcDevRoot {
+    pub(super) fn new(static_entries: DirMapping, fs: Arc<SimpleFs>) -> Self {
+        Self {
+            static_entries,
+            cameras: UvcVideoDir::new(fs),
+        }
+    }
+}
+
+impl SimpleDirOps for UvcDevRoot {
+    fn child_names<'a>(&'a self) -> Box<dyn Iterator<Item = Cow<'a, str>> + 'a> {
+        Box::new(self.static_entries.child_names().chain(self.cameras.child_names()))
+    }
+
+    fn lookup_child(&self, name: &str) -> VfsResult<NodeOpsMux> {
+        match self.static_entries.lookup_child(name) {
+            Err(VfsError::NotFound) => self.cameras.lookup_child(name),
+            result => result,
+        }
+    }
+
+    fn is_cacheable(&self) -> bool {
+        false
+    }
+
+    fn is_cacheable_child(&self, name: &str) -> bool {
+        self.static_entries.child_names().any(|child| child == name)
+    }
+}
 
 struct CameraSlot {
     snapshot: UsbDeviceSnapshotInfo,

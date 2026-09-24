@@ -70,8 +70,6 @@ pub use log::bind_dev_log;
 use rand::{Rng, SeedableRng, rngs::ChaCha20Rng};
 
 use crate::pseudofs::{Device, DeviceOps, DirMaker, DirMapping, SimpleDir, SimpleFile, SimpleFs};
-#[cfg(feature = "uvc")]
-use crate::pseudofs::SimpleDirOps;
 
 const RANDOM_SEED_STEP: u64 = 0x9e37_79b9_7f4a_7c15;
 
@@ -835,7 +833,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     }
     #[cfg(feature = "uvc")]
     {
-        SimpleDir::new_maker(fs.clone(), Arc::new(root.chain(video_dir::UvcVideoDir::new(fs))))
+        SimpleDir::new_maker(fs.clone(), Arc::new(video_dir::UvcDevRoot::new(root, fs)))
     }
 
     #[cfg(not(feature = "uvc"))]

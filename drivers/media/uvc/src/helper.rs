@@ -200,7 +200,8 @@ fn handle_vs_block(
                 }
             }
             StillImageFrame => {
-                return Err(anyhow!("UVC VideoStreaming Still Image format not supported").into());
+                // Still-image capture is optional and does not affect video frames.
+                debug!("VS StillImageFrame ignored");
             }
             FormatMpeg2Ts => {
                 return Err(anyhow!("UVC VideoStreaming MPEG-2 TS format not supported").into());
@@ -608,7 +609,13 @@ mod tests {
 
     #[test]
     fn parse_uvc_device_single_pass_extracts_all() {
-        let blob = build_uvc_blob(0x01, 0x02);
+        let mut blob = build_uvc_blob(0x01, 0x02);
+        let still_image = [6, 0x24, 0x03, 0, 0, 0];
+        let next_interface = blob
+            .windows(9)
+            .position(|descriptor| descriptor == [9, 0x04, 3, 1, 1, 0x0E, 0x02, 0, 0])
+            .unwrap();
+        blob.splice(next_interface..next_interface, still_image);
         let cfg = parse_uvc_device(&blob).unwrap();
 
         assert_eq!(cfg.vc_iface_num, 0);

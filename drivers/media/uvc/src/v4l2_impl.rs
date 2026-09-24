@@ -28,16 +28,19 @@ use crate::{FrameIntervals, UvcDevice, UvcHandle, VideoFormat};
 const PIX_FMT_MJPEG: u32 = 0x47504a4d;
 const PIX_FMT_YUYV: u32 = 0x56595559;
 
+fn claim_video_interfaces<H: UvcHandle>(handle: &H, vc: u8, vs: u8) -> ax_media::Result<()> {
+    handle.claim_interface(vc, 0).map_err(|_| V4l2Error::Busy)?;
+    if let Err(error) = handle.claim_interface(vs, 0) {
+        let _ = handle.release_interface(vc);
+        warn!("[UVC] failed to claim VS interface: {error:?}");
+        return Err(V4l2Error::Busy);
+    }
+    Ok(())
+}
+
 impl<H: UvcHandle, M: VbMemOps + 'static> V4L2DriverOps for UvcDevice<H, M> {
     fn open(&self) -> ax_media::Result<()> {
-        self.handle
-            .claim_interface(self.vc_iface_num, 0)
-            .map_err(|_| V4l2Error::Busy)?;
-        if let Err(error) = self.handle.claim_interface(self.vs_iface_num, 0) {
-            let _ = self.handle.release_interface(self.vc_iface_num);
-            log::warn!("[UVC] failed to claim VS interface: {error:?}");
-            return Err(V4l2Error::Busy);
-        }
+        claim_video_interfaces(self.handle.as_ref(), self.vc_iface_num, self.vs_iface_num)?;
         self.register_controls(&self.vc_units);
         Ok(())
     }
@@ -590,5 +593,81 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
         sub: &EventSubscription,
     ) -> ax_media::Result<()> {
         self.ctrls.lock().subscribe_event(fh, sub)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::{sync::Arc, vec::Vec};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use crab_usb::{
+        err::USBError,
+        usb_if::{endpoint::TransferRequest, host::ControlSetup},
+    };
+
+    use super::*;
+
+    struct FakeHandle {
+        calls: Arc<Mutex<Vec<(bool, u8)>>>,
+        fail_vs: Arc<AtomicBool>,
+    }
+
+    impl UvcHandle for FakeHandle {
+        fn claim_interface(&self, interface: u8, _: u8) -> Result<(), USBError> {
+            self.calls.lock().unwrap().push((true, interface));
+            if interface == 3 && self.fail_vs.load(Ordering::Relaxed) {
+                Err(USBError::NotSupported)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn release_interface(&self, interface: u8) -> Result<(), USBError> {
+            self.calls.lock().unwrap().push((false, interface));
+            Ok(())
+        }
+
+        fn control_in(&self, _: ControlSetup, _: &mut [u8]) -> Result<usize, USBError> {
+            Err(USBError::NotSupported)
+        }
+
+        fn control_out(&self, _: ControlSetup, _: &[u8]) -> Result<(), USBError> {
+            Err(USBError::NotSupported)
+        }
+
+        fn submit_endpoint_transfer(
+            &self,
+            _: u8,
+            _: TransferRequest,
+        ) -> Result<crate::IsoPending, USBError> {
+            Err(USBError::NotSupported)
+        }
+    }
+
+    #[test]
+    fn failed_vs_claim_releases_vc_before_next_attempt() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let fail_vs = Arc::new(AtomicBool::new(true));
+        let handle = FakeHandle {
+            calls: calls.clone(),
+            fail_vs: fail_vs.clone(),
+        };
+
+        assert!(matches!(
+            claim_video_interfaces(&handle, 0, 3),
+            Err(V4l2Error::Busy)
+        ));
+        assert_eq!(*calls.lock().unwrap(), [(true, 0), (true, 3), (false, 0)]);
+
+        fail_vs.store(false, Ordering::Relaxed);
+        assert!(claim_video_interfaces(&handle, 0, 3).is_ok());
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [(true, 0), (true, 3), (false, 0), (true, 0), (true, 3),]
+        );
     }
 }
