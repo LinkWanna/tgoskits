@@ -486,11 +486,11 @@ impl UsbDeviceFile {
             .copied()
             .ok_or(StarryError::InvalidInput)?;
         let submitted = self.drain_submitted_urbs_for_interface(interface);
-        if let Some(lease) = self.lease.lock().as_ref().cloned() {
-            if let Err(err) = lease.release_interface(interface) {
-                self.submitted_urbs.lock().extend(submitted);
-                return Err(err);
-            }
+        if let Some(lease) = self.lease.lock().as_ref().cloned()
+            && let Err(err) = lease.release_interface(interface)
+        {
+            self.submitted_urbs.lock().extend(submitted);
+            return Err(err);
         }
         self.claimed_interfaces.lock().remove(&interface);
         // Release quiesces the endpoint. Keep this fd alive until every URB
