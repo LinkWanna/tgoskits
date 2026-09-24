@@ -432,12 +432,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
         let response =
             self.get_vs_control(VideoStreamingControl::Probe as u8, self.stream_control_len)?;
         let accepted = StreamControl::parse(&response)?;
-        let accepted_pos = self
-            .formats
-            .iter()
-            .position(|fmt| {
-                fmt.format_index == accepted.format_index && fmt.frame_index == accepted.frame_index
-            })
+        let accepted_pos = accepted_format_index(&self.formats, format, &accepted)
             .ok_or(USBError::InvalidParameter)?;
         if accepted.frame_interval == 0 {
             return Err(USBError::InvalidParameter);
@@ -723,6 +718,32 @@ fn select_format_index(
         .map(|(index, _)| index)
 }
 
+/// Keep the requested frame when a camera returns unknown PROBE indices.
+fn accepted_format_index(
+    formats: &[VideoFormat],
+    requested: &VideoFormat,
+    control: &StreamControl,
+) -> Option<usize> {
+    let requested_index = formats.iter().position(|format| {
+        format.format_index == requested.format_index && format.frame_index == requested.frame_index
+    })?;
+    formats
+        .iter()
+        .position(|format| {
+            format.format_index == control.format_index && format.frame_index == control.frame_index
+        })
+        .or_else(|| {
+            warn!(
+                "[UVC] camera returned unknown PROBE format/frame {}/{}; keeping requested {}/{}",
+                control.format_index,
+                control.frame_index,
+                requested.format_index,
+                requested.frame_index
+            );
+            Some(requested_index)
+        })
+}
+
 impl<H: UvcHandle, M: VbMemOps + 'static> Drop for UvcDevice<H, M> {
     fn drop(&mut self) {
         self.close_stream();
@@ -840,5 +861,45 @@ mod format_tests {
             select_format_index(&formats, format::PIX_FMT_MJPEG, 640, 480),
             Some(0)
         );
+    }
+
+    #[test]
+    fn unknown_probe_indices_keep_requested_frame() {
+        let format = VideoFormat {
+            format_type: VideoFormatType::Mjpeg,
+            width: 640,
+            height: 480,
+            format_index: 1,
+            frame_index: 2,
+            default_interval: 333_333,
+            intervals: FrameIntervals::Discrete(Vec::new()),
+            max_frame_size: 640 * 480,
+        };
+        let formats = [
+            VideoFormat {
+                frame_index: 1,
+                ..format.clone()
+            },
+            format.clone(),
+        ];
+        let mut control = StreamControl {
+            hint: 1,
+            format_index: 99,
+            frame_index: 99,
+            frame_interval: 333_333,
+            key_frame_rate: 0,
+            p_frame_rate: 0,
+            comp_quality: 0,
+            comp_window_size: 0,
+            delay: 0,
+            max_video_frame_size: 640 * 480,
+            max_payload_transfer_size: 1024,
+            extension: [0; 22],
+            wire_len: 26,
+        };
+        assert_eq!(accepted_format_index(&formats, &format, &control), Some(1));
+        control.format_index = 1;
+        control.frame_index = 2;
+        assert_eq!(accepted_format_index(&formats, &format, &control), Some(1));
     }
 }
