@@ -1,77 +1,6 @@
-use bitflags::bitflags;
-
-bitflags! {
-    /// 载荷头标志 (2.4.3.3)。
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) struct PayloadHeaderFlags: u8 {
-        const EOH = 1 << 7; // End of Header
-        const ERR = 1 << 6; // Error
-        const STI = 1 << 5; // Still Image
-        const RES = 1 << 4; // Reserved
-        const SCR = 1 << 3; // Source Clock Reference
-        const PTS = 1 << 2; // Presentation Time Stamp
-        const EOF = 1 << 1; // End of Frame
-        const FID = 1 << 0; // Frame ID
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct UvcPayloadHeader {
-    pub flag: PayloadHeaderFlags,
-    #[allow(dead_code)]
-    pub pts: Option<u32>,
-}
-
-impl Default for UvcPayloadHeader {
-    fn default() -> Self {
-        Self {
-            flag: PayloadHeaderFlags::empty(),
-            pts: None,
-        }
-    }
-}
-
-impl UvcPayloadHeader {
-    /// Parse payload header.
-    pub(crate) fn parse(buf: &[u8]) -> Option<(Self, usize)> {
-        if buf.len() < 2 {
-            return None;
-        }
-        let b_length = buf[0] as usize;
-        let flag = PayloadHeaderFlags::from_bits_truncate(buf[1]);
-        if b_length < 2 || b_length > buf.len() {
-            return None;
-        }
-
-        let has_pts = flag.contains(PayloadHeaderFlags::PTS);
-        let has_scr = flag.contains(PayloadHeaderFlags::SCR);
-
-        let mut offset = 2usize;
-        let pts = if has_pts {
-            if offset + 4 > b_length {
-                return None;
-            }
-            let v = u32::from_le_bytes([
-                buf[offset],
-                buf[offset + 1],
-                buf[offset + 2],
-                buf[offset + 3],
-            ]);
-            offset += 4;
-            Some(v)
-        } else {
-            None
-        };
-
-        if has_scr && offset + 6 > b_length {
-            return None;
-        }
-
-        let header = UvcPayloadHeader { flag, pts };
-
-        Some((header, b_length))
-    }
-}
+#[cfg(test)]
+use uvc_if::payload::PayloadHeaderFlags;
+use uvc_if::payload::UvcPayloadHeader;
 
 /// Frame parser.
 #[derive(Debug, Default)]
@@ -109,8 +38,8 @@ impl FrameParser {
             }
         };
 
-        let fid = hdr.flag.contains(PayloadHeaderFlags::FID);
-        let eof = hdr.flag.contains(PayloadHeaderFlags::EOF);
+        let fid = hdr.fid;
+        let eof = hdr.eof;
         let fid_toggle = self.last_fid.is_some_and(|last| last != fid);
         if fid_toggle && (self.filled > 0 || self.invalid) {
             let (bytes, invalid) = self.finish_frame();
@@ -133,7 +62,7 @@ impl FrameParser {
         }
         self.last_fid = Some(fid);
 
-        if hdr.flag.contains(PayloadHeaderFlags::ERR) {
+        if hdr.has_err {
             self.invalid = true;
         }
 

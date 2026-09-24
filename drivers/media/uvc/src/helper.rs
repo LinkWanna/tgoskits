@@ -1,71 +1,26 @@
 use alloc::vec::Vec;
 
 use anyhow::anyhow;
-use crab_usb::err::USBError;
+use crab_usb::{
+    err::USBError,
+    usb_if::{
+        descriptor::{Class, DescriptorType, EndpointType},
+        endpoint::EndpointAddress,
+        transfer::Direction,
+    },
+};
 use log::debug;
+use uvc_if::descriptors::protocol_codes;
 
 use crate::{
-    AlternateSetting, DescriptorParser, FrameIntervals, InputTerminalDescriptor, StreamControl,
+    AlternateSetting, DescriptorParser, FrameIntervals, InputTerminalDescriptor,
     UncompressedFormat, VideoFormat, VideoFormatType,
     controls::VcUnits,
     descriptors::{
-        DescriptorType, InputHeaderDescriptor, InterfaceSubclass, TerminalType,
-        VcDescriptorSubtype, VsDescriptorSubtype,
+        InputHeaderDescriptor, InterfaceSubclass, TerminalType, VcDescriptorSubtype,
+        VsDescriptorSubtype,
     },
 };
-
-/// Serialize stream control.
-pub(crate) fn serialize_stream_control(ctrl: &StreamControl) -> Vec<u8> {
-    let mut data = Vec::with_capacity(26);
-
-    data.extend(&ctrl.hint.to_le_bytes());
-    data.push(ctrl.format_index);
-    data.push(ctrl.frame_index);
-    data.extend(&ctrl.frame_interval.to_le_bytes());
-    data.extend(&ctrl.key_frame_rate.to_le_bytes());
-    data.extend(&ctrl.p_frame_rate.to_le_bytes());
-    data.extend(&ctrl.comp_quality.to_le_bytes());
-    data.extend(&ctrl.comp_window_size.to_le_bytes());
-    data.extend(&ctrl.delay.to_le_bytes());
-    data.extend(&ctrl.max_video_frame_size.to_le_bytes());
-    data.extend(&ctrl.max_payload_transfer_size.to_le_bytes());
-
-    debug!("Serialized stream control: {} bytes", data.len());
-    data
-}
-
-/// Parse stream control.
-pub(crate) fn parse_stream_control(data: &[u8]) -> Result<StreamControl, USBError> {
-    if data.len() < 26 {
-        Err(anyhow!("Stream control response too short"))?;
-    }
-
-    let hint = u16::from_le_bytes([data[0], data[1]]);
-    let format_index = data[2];
-    let frame_index = data[3];
-    let frame_interval = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-    let key_frame_rate = u16::from_le_bytes([data[8], data[9]]);
-    let p_frame_rate = u16::from_le_bytes([data[10], data[11]]);
-    let comp_quality = u16::from_le_bytes([data[12], data[13]]);
-    let comp_window_size = u16::from_le_bytes([data[14], data[15]]);
-    let delay = u16::from_le_bytes([data[16], data[17]]);
-    let max_video_frame_size = u32::from_le_bytes([data[18], data[19], data[20], data[21]]);
-    let max_payload_transfer_size = u32::from_le_bytes([data[22], data[23], data[24], data[25]]);
-
-    Ok(StreamControl {
-        hint,
-        format_index,
-        frame_index,
-        frame_interval,
-        key_frame_rate,
-        p_frame_rate,
-        comp_quality,
-        comp_window_size,
-        delay,
-        max_video_frame_size,
-        max_payload_transfer_size,
-    })
-}
 
 #[derive(Debug)]
 pub(crate) struct UvcDeviceConfig {
@@ -85,7 +40,7 @@ fn handle_vs_block(
     if blob.len() < 3 {
         return Err(anyhow!("VS block too short").into());
     }
-    if blob[1] != DescriptorType::CsInterface.into() {
+    if blob[1] != DescriptorType::CLASS_SPECIFIC_INTERFACE.into() {
         return Err(anyhow!("VS block must start with CS_INTERFACE").into());
     }
     let first_subtype = VsDescriptorSubtype::from(blob[2]);
@@ -131,7 +86,7 @@ fn handle_vs_block(
             break;
         }
         let dtype = blob[consumed + 1];
-        if dtype != DescriptorType::CsInterface.into() {
+        if dtype != DescriptorType::CLASS_SPECIFIC_INTERFACE.into() {
             break;
         }
         let subtype = VsDescriptorSubtype::from(blob[consumed + 2]);
@@ -231,7 +186,7 @@ fn handle_vc_block(blob: &[u8], parser: &DescriptorParser) -> Result<(VcUnits, u
     if blob.len() < 3 {
         return Err(anyhow!("VC block too short").into());
     }
-    if blob[1] != DescriptorType::CsInterface.into() {
+    if blob[1] != DescriptorType::CLASS_SPECIFIC_INTERFACE.into() {
         return Err(anyhow!("VC block must start with CS_INTERFACE").into());
     }
     if VcDescriptorSubtype::from(blob[2]) != Header {
@@ -262,7 +217,7 @@ fn handle_vc_block(blob: &[u8], parser: &DescriptorParser) -> Result<(VcUnits, u
             break;
         }
         let dtype = blob[consumed + 1];
-        if dtype != DescriptorType::CsInterface.into() {
+        if dtype != DescriptorType::CLASS_SPECIFIC_INTERFACE.into() {
             break;
         }
         let subtype = VcDescriptorSubtype::from(blob[consumed + 2]);
@@ -333,10 +288,13 @@ pub(crate) fn parse_uvc_device(blob: &[u8]) -> Result<UvcDeviceConfig, USBError>
         let desc = &blob[pos..pos + length];
 
         match DescriptorType::from(descriptor_type) {
-            DescriptorType::Interface if length >= 9 => {
+            DescriptorType::INTERFACE if length >= 9 => {
                 let (number, alternate, class, subclass, protocol) =
                     (desc[2], desc[3], desc[5], desc[6], desc[7]);
-                if class == 0x0E {
+                if matches!(
+                    Class::from_class_and_subclass(class, subclass, protocol),
+                    Class::Video
+                ) {
                     match InterfaceSubclass::from(subclass) {
                         VideoControl => vc_iface_num = Some(number),
                         VideoStreaming => vs_iface_num = Some(number),
@@ -352,14 +310,17 @@ pub(crate) fn parse_uvc_device(blob: &[u8]) -> Result<UvcDeviceConfig, USBError>
                 }
                 cur_iface = Some((number, alternate, class, subclass, protocol));
             }
-            DescriptorType::Endpoint if length >= 7 => {
+            DescriptorType::ENDPOINT if length >= 7 => {
                 if let Some((number, alternate, class, subclass, protocol)) = cur_iface
-                    && class == 0x0E
+                    && matches!(
+                        Class::from_class_and_subclass(class, subclass, protocol),
+                        Class::Video
+                    )
                     && InterfaceSubclass::from(subclass) == VideoStreaming
-                    && protocol == 0x00
+                    && protocol == protocol_codes::UNDEFINED
                     && vs_iface_num == Some(number)
-                    && desc[3] & 0x03 == 0x01
-                    && desc[2] & 0x80 != 0
+                    && desc[3] & 0x03 == EndpointType::Isochronous as u8
+                    && EndpointAddress::new(desc[2]).direction() == Direction::In
                 {
                     let mps_raw = u16::from_le_bytes([desc[4], desc[5]]);
                     alt_settings.push(AlternateSetting {
@@ -371,12 +332,15 @@ pub(crate) fn parse_uvc_device(blob: &[u8]) -> Result<UvcDeviceConfig, USBError>
                     });
                 }
             }
-            DescriptorType::CsInterface if length >= 3 => {
+            DescriptorType::CLASS_SPECIFIC_INTERFACE if length >= 3 => {
                 let subtype = desc[2];
-                match cur_iface
-                    .map(|(_, _, class, subclass, _)| (class, InterfaceSubclass::from(subclass)))
-                {
-                    Some((0x0E, VideoControl)) => {
+                match cur_iface.map(|(_, _, class, subclass, protocol)| {
+                    (
+                        Class::from_class_and_subclass(class, subclass, protocol),
+                        InterfaceSubclass::from(subclass),
+                    )
+                }) {
+                    Some((Class::Video, VideoControl)) => {
                         let vc_subtype = VcDescriptorSubtype::from(subtype);
                         match vc_subtype {
                             VcDescriptorSubtype::Header => {
@@ -406,7 +370,7 @@ pub(crate) fn parse_uvc_device(blob: &[u8]) -> Result<UvcDeviceConfig, USBError>
                             }
                         }
                     }
-                    Some((0x0E, VideoStreaming)) => {
+                    Some((Class::Video, VideoStreaming)) => {
                         let vs_subtype = VsDescriptorSubtype::from(subtype);
                         match vs_subtype {
                             VsDescriptorSubtype::InputHeader => {

@@ -15,7 +15,9 @@ use crab_usb::usb_if::{
 
 use crate::{
     UvcDevice, UvcHandle,
-    descriptors::{ControlCapabilities, RequestCode},
+    descriptors::{
+        ControlCapabilities, RequestCode, camera_terminal_controls, processing_unit_controls,
+    },
 };
 
 /// Parsed VC units.
@@ -25,61 +27,6 @@ pub(crate) struct VcUnits {
     pub camera_controls: Vec<u8>,
     pub processing_unit_id: Option<u8>,
     pub processing_controls: Vec<u8>,
-}
-
-/// 摄像头终端控制选择器 (A.9.4)
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-enum CameraTerminalControl {
-    Undefined            = 0x00,
-    ScanningMode         = 0x01,
-    AeMode               = 0x02,
-    AePriority           = 0x03,
-    ExposureTimeAbsolute = 0x04,
-    ExposureTimeRelative = 0x05,
-    FocusAbsolute        = 0x06,
-    FocusRelative        = 0x07,
-    FocusAuto            = 0x08,
-    IrisAbsolute         = 0x09,
-    IrisRelative         = 0x0A,
-    ZoomAbsolute         = 0x0B,
-    ZoomRelative         = 0x0C,
-    PantiltAbsolute      = 0x0D,
-    PantiltRelative      = 0x0E,
-    RollAbsolute         = 0x0F,
-    RollRelative         = 0x10,
-    Privacy              = 0x11,
-    FocusSimple          = 0x12,
-    DigitalWindow        = 0x13,
-    RegionOfInterest     = 0x14,
-}
-
-/// 处理单元控制选择器 (A.9.5)
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-enum ProcessingUnitControl {
-    Undefined           = 0x00,
-    BacklightCompensation = 0x01,
-    Brightness          = 0x02,
-    Contrast            = 0x03,
-    Gain                = 0x04,
-    PowerLineFrequency  = 0x05,
-    Hue                 = 0x06,
-    Saturation          = 0x07,
-    Sharpness           = 0x08,
-    Gamma               = 0x09,
-    WhiteBalanceTemperature = 0x0A,
-    WhiteBalanceTemperatureAuto = 0x0B,
-    WhiteBalanceComponent = 0x0C,
-    WhiteBalanceComponentAuto = 0x0D,
-    DigitalMultiplier   = 0x0E,
-    DigitalMultiplierLimit = 0x0F,
-    HueAuto             = 0x10,
-    AnalogVideoStandard = 0x11,
-    AnalogLockStatus    = 0x12,
-    ContrastAuto        = 0x13,
 }
 
 /// Power line frequency menu.
@@ -115,7 +62,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: UserClassCtrl::Brightness as u32,
         name: "Brightness",
-        selector: ProcessingUnitControl::Brightness as u8,
+        selector: processing_unit_controls::BRIGHTNESS,
         size: 2,
         ctrl_bit: 0,
         ty: UvcCtrlType::Integer,
@@ -123,7 +70,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: UserClassCtrl::Contrast as u32,
         name: "Contrast",
-        selector: ProcessingUnitControl::Contrast as u8,
+        selector: processing_unit_controls::CONTRAST,
         size: 2,
         ctrl_bit: 1,
         ty: UvcCtrlType::Integer,
@@ -131,7 +78,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: UserClassCtrl::Hue as u32,
         name: "Hue",
-        selector: ProcessingUnitControl::Hue as u8,
+        selector: processing_unit_controls::HUE,
         size: 2,
         ctrl_bit: 2,
         ty: UvcCtrlType::Integer,
@@ -139,7 +86,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: UserClassCtrl::Saturation as u32,
         name: "Saturation",
-        selector: ProcessingUnitControl::Saturation as u8,
+        selector: processing_unit_controls::SATURATION,
         size: 2,
         ctrl_bit: 3,
         ty: UvcCtrlType::Integer,
@@ -147,7 +94,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: UserClassCtrl::Sharpness as u32,
         name: "Sharpness",
-        selector: ProcessingUnitControl::Sharpness as u8,
+        selector: processing_unit_controls::SHARPNESS,
         size: 2,
         ctrl_bit: 4,
         ty: UvcCtrlType::Integer,
@@ -155,7 +102,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: UserClassCtrl::Gamma as u32,
         name: "Gamma",
-        selector: ProcessingUnitControl::Gamma as u8,
+        selector: processing_unit_controls::GAMMA,
         size: 2,
         ctrl_bit: 5,
         ty: UvcCtrlType::Integer,
@@ -163,7 +110,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: UserClassCtrl::WhiteBalanceTemperature as u32,
         name: "White Balance Temperature",
-        selector: ProcessingUnitControl::WhiteBalanceTemperature as u8,
+        selector: processing_unit_controls::WHITE_BALANCE_TEMPERATURE,
         size: 2,
         ctrl_bit: 6,
         ty: UvcCtrlType::Integer,
@@ -171,7 +118,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: UserClassCtrl::BacklightCompensation as u32,
         name: "Backlight Compensation",
-        selector: ProcessingUnitControl::BacklightCompensation as u8,
+        selector: processing_unit_controls::BACKLIGHT_COMPENSATION,
         size: 2,
         ctrl_bit: 8,
         ty: UvcCtrlType::Integer,
@@ -179,7 +126,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: UserClassCtrl::Gain as u32,
         name: "Gain",
-        selector: ProcessingUnitControl::Gain as u8,
+        selector: processing_unit_controls::GAIN,
         size: 2,
         ctrl_bit: 9,
         ty: UvcCtrlType::Integer,
@@ -187,7 +134,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: UserClassCtrl::PowerLineFrequency as u32,
         name: "Power Line Frequency",
-        selector: ProcessingUnitControl::PowerLineFrequency as u8,
+        selector: processing_unit_controls::POWER_LINE_FREQUENCY,
         size: 1,
         ctrl_bit: 10,
         ty: UvcCtrlType::Menu(POWER_LINE_FREQ_MENU),
@@ -195,7 +142,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: UserClassCtrl::HueAuto as u32,
         name: "Hue Auto",
-        selector: ProcessingUnitControl::HueAuto as u8,
+        selector: processing_unit_controls::HUE_AUTO,
         size: 1,
         ctrl_bit: 11,
         ty: UvcCtrlType::Boolean,
@@ -203,7 +150,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: UserClassCtrl::AutoWhiteBalance as u32,
         name: "Auto White Balance",
-        selector: ProcessingUnitControl::WhiteBalanceTemperatureAuto as u8,
+        selector: processing_unit_controls::WHITE_BALANCE_TEMPERATURE_AUTO,
         size: 1,
         ctrl_bit: 12,
         ty: UvcCtrlType::Boolean,
@@ -214,7 +161,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: CameraClassCtrl::ExposureAuto as u32,
         name: "Exposure, Auto",
-        selector: CameraTerminalControl::AeMode as u8,
+        selector: camera_terminal_controls::AE_MODE,
         size: 1,
         ctrl_bit: 1,
         ty: UvcCtrlType::Menu(EXPOSURE_AUTO_MENU),
@@ -222,7 +169,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: CameraClassCtrl::ExposureAutoPriority as u32,
         name: "Exposure, Auto Priority",
-        selector: CameraTerminalControl::AePriority as u8,
+        selector: camera_terminal_controls::AE_PRIORITY,
         size: 1,
         ctrl_bit: 2,
         ty: UvcCtrlType::Boolean,
@@ -230,7 +177,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: CameraClassCtrl::ExposureAbsolute as u32,
         name: "Exposure (Absolute)",
-        selector: CameraTerminalControl::ExposureTimeAbsolute as u8,
+        selector: camera_terminal_controls::EXPOSURE_TIME_ABSOLUTE,
         size: 4,
         ctrl_bit: 3,
         ty: UvcCtrlType::Integer,
@@ -238,7 +185,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: CameraClassCtrl::FocusAbsolute as u32,
         name: "Focus (Absolute)",
-        selector: CameraTerminalControl::FocusAbsolute as u8,
+        selector: camera_terminal_controls::FOCUS_ABSOLUTE,
         size: 2,
         ctrl_bit: 5,
         ty: UvcCtrlType::Integer,
@@ -246,7 +193,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: CameraClassCtrl::FocusAuto as u32,
         name: "Focus, Auto",
-        selector: CameraTerminalControl::FocusAuto as u8,
+        selector: camera_terminal_controls::FOCUS_AUTO,
         size: 1,
         ctrl_bit: 17,
         ty: UvcCtrlType::Boolean,
@@ -254,7 +201,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: CameraClassCtrl::IrisAbsolute as u32,
         name: "Iris, Absolute",
-        selector: CameraTerminalControl::IrisAbsolute as u8,
+        selector: camera_terminal_controls::IRIS_ABSOLUTE,
         size: 2,
         ctrl_bit: 7,
         ty: UvcCtrlType::Integer,
@@ -262,7 +209,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: CameraClassCtrl::ZoomAbsolute as u32,
         name: "Zoom, Absolute",
-        selector: CameraTerminalControl::ZoomAbsolute as u8,
+        selector: camera_terminal_controls::ZOOM_ABSOLUTE,
         size: 2,
         ctrl_bit: 9,
         ty: UvcCtrlType::Integer,
@@ -270,7 +217,7 @@ const UVC_CONTROL_CT_DEFS: &[UvcControlDef] = &[
     UvcControlDef {
         cid: CameraClassCtrl::Privacy as u32,
         name: "Privacy",
-        selector: CameraTerminalControl::Privacy as u8,
+        selector: camera_terminal_controls::PRIVACY,
         size: 1,
         ctrl_bit: 18,
         ty: UvcCtrlType::Boolean,

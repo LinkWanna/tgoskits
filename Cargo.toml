@@ -88,6 +88,7 @@ members = [
     "drivers/usb/usb-device/uvc",
     "drivers/usb/usb-host",
     "drivers/usb/usb-if",
+    "drivers/usb/uvc-if",
     "drivers/usb/usb-serial",
     "drivers/usb/utils/*",
 
@@ -256,6 +257,7 @@ sdmmc-host = { version = "0.1", path = "drivers/blk/sdmmc-host" }
 aic8800 = { version = "0.3", path = "drivers/net/aic8800" }
 crab-usb = { version = "0.12", path = "drivers/usb/usb-host" }
 usb-if = { version = "0.8", path = "drivers/usb/usb-if" }
+uvc-if = { version = "0.1", path = "drivers/usb/uvc-if" }
 usb-serial = { version = "0.1", path = "drivers/usb/usb-serial" }
 ax-media = { version = "0.1", path = "drivers/media/ax-media" }
 media-uvc = { version = "0.1", path = "drivers/media/uvc" }

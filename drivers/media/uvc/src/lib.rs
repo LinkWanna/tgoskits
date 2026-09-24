@@ -25,10 +25,11 @@ use crab_usb::{
 };
 use log::*;
 pub use stream::IsoPending;
+use uvc_if::stream_control::StreamControl;
 
 use crate::{
     frame::FrameParser,
-    helper::{parse_stream_control, parse_uvc_device},
+    helper::parse_uvc_device,
     stream::{FrameAssembler, ISO_BATCH, ISO_DEPTH, IsoStop, IsoStream},
 };
 
@@ -244,22 +245,6 @@ impl UncompressedFormat {
     }
 }
 
-/// Stream control.
-#[derive(Debug, Clone)]
-pub(crate) struct StreamControl {
-    hint: u16,
-    format_index: u8,
-    frame_index: u8,
-    frame_interval: u32,
-    key_frame_rate: u16,
-    p_frame_rate: u16,
-    comp_quality: u16,
-    comp_window_size: u16,
-    delay: u16,
-    max_video_frame_size: u32,
-    max_payload_transfer_size: u32,
-}
-
 /// Alternate setting.
 #[derive(Debug, Clone)]
 pub(crate) struct AlternateSetting {
@@ -406,7 +391,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
         }
         self.send_vs_control(VideoStreamingControl::Probe as u8, &requested)?;
         let response = self.get_vs_control(VideoStreamingControl::Probe as u8, 26)?;
-        let accepted = parse_stream_control(&response)?;
+        let accepted = StreamControl::parse(&response)?;
         let accepted_pos = self
             .formats
             .iter()
@@ -580,7 +565,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
     ) -> Result<(), USBError> {
         let vs_interface_num = self.vs_iface_num;
 
-        let data = helper::serialize_stream_control(stream_ctrl);
+        let data = stream_ctrl.to_bytes();
         let setup = ControlSetup {
             request_type: RequestType::Class,
             recipient: Recipient::Interface,

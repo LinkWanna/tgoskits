@@ -2503,6 +2503,7 @@ dependencies = [
  "log",
  "tokio",
  "usb-if",
+ "uvc-if",
 ]
 
 [[package]]
@@ -5162,6 +5163,7 @@ dependencies = [
  "bitflags 2.13.2",
  "crab-usb",
  "log",
+ "uvc-if",
 ]
 
 [[package]]
@@ -9222,6 +9224,16 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
+name = "uvc-if"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bitflags 2.13.2",
+ "log",
+ "usb-if",
 ]
 
 [[package]]

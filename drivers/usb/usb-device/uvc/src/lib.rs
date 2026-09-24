@@ -16,6 +16,7 @@ use usb_if::{
     host::ControlSetup,
     transfer::{Direction, Recipient, Request, RequestType},
 };
+use uvc_if::stream_control::StreamControl;
 
 // 导入描述符解析模块
 pub mod descriptors;
@@ -211,22 +212,6 @@ pub enum UvcDeviceState {
     Streaming,
     /// 错误状态
     Error(String),
-}
-
-/// UVC Stream Control 结构体 (参考 UVC 规范 4.3.1.1)
-#[derive(Debug, Clone)]
-struct StreamControl {
-    hint: u16,                      // bmHint
-    format_index: u8,               // bFormatIndex
-    frame_index: u8,                // bFrameIndex
-    frame_interval: u32,            // dwFrameInterval (100ns units)
-    key_frame_rate: u16,            // wKeyFrameRate
-    p_frame_rate: u16,              // wPFrameRate
-    comp_quality: u16,              // wCompQuality
-    comp_window_size: u16,          // wCompWindowSize
-    delay: u16,                     // wDelay
-    max_video_frame_size: u32,      // dwMaxVideoFrameSize
-    max_payload_transfer_size: u32, // dwMaxPayloadTransferSize
 }
 
 pub struct UvcDevice {
@@ -795,7 +780,7 @@ impl UvcDevice {
         let probe_response = self
             .get_vs_control(vs_controls::VS_PROBE_CONTROL, 26)
             .await?;
-        stream_ctrl = self.parse_stream_control(&probe_response)?;
+        stream_ctrl = StreamControl::parse(&probe_response)?;
 
         // 4. 发送 COMMIT 控制请求
         debug!("Sending COMMIT control request");
@@ -1143,7 +1128,7 @@ impl UvcDevice {
         let vs_interface_num = self.video_streaming_interface_num;
 
         // 序列化 StreamControl 到字节数组
-        let data = self.serialize_stream_control(stream_ctrl);
+        let data = stream_ctrl.to_bytes();
 
         let setup = ControlSetup {
             request_type: RequestType::Class,
@@ -1193,77 +1178,6 @@ impl UvcDevice {
         Ok(buffer)
     }
 
-    /// 序列化 StreamControl 结构体
-    fn serialize_stream_control(&self, ctrl: &StreamControl) -> Vec<u8> {
-        let mut data = Vec::with_capacity(26);
-
-        // bmHint (2 bytes)
-        data.extend(&ctrl.hint.to_le_bytes());
-        // bFormatIndex (1 byte)
-        data.push(ctrl.format_index);
-        // bFrameIndex (1 byte)
-        data.push(ctrl.frame_index);
-        // dwFrameInterval (4 bytes)
-        data.extend(&ctrl.frame_interval.to_le_bytes());
-        // wKeyFrameRate (2 bytes)
-        data.extend(&ctrl.key_frame_rate.to_le_bytes());
-        // wPFrameRate (2 bytes)
-        data.extend(&ctrl.p_frame_rate.to_le_bytes());
-        // wCompQuality (2 bytes)
-        data.extend(&ctrl.comp_quality.to_le_bytes());
-        // wCompWindowSize (2 bytes)
-        data.extend(&ctrl.comp_window_size.to_le_bytes());
-        // wDelay (2 bytes)
-        data.extend(&ctrl.delay.to_le_bytes());
-        // dwMaxVideoFrameSize (4 bytes)
-        data.extend(&ctrl.max_video_frame_size.to_le_bytes());
-        // dwMaxPayloadTransferSize (4 bytes)
-        data.extend(&ctrl.max_payload_transfer_size.to_le_bytes());
-
-        debug!("Serialized stream control: {} bytes", data.len());
-        data
-    }
-
-    /// 解析 StreamControl 响应
-    fn parse_stream_control(&self, data: &[u8]) -> Result<StreamControl, USBError> {
-        if data.len() < 26 {
-            Err(anyhow!("Stream control response too short"))?;
-        }
-
-        let hint = u16::from_le_bytes([data[0], data[1]]);
-        let format_index = data[2];
-        let frame_index = data[3];
-        let frame_interval = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-        let key_frame_rate = u16::from_le_bytes([data[8], data[9]]);
-        let p_frame_rate = u16::from_le_bytes([data[10], data[11]]);
-        let comp_quality = u16::from_le_bytes([data[12], data[13]]);
-        let comp_window_size = u16::from_le_bytes([data[14], data[15]]);
-        let delay = u16::from_le_bytes([data[16], data[17]]);
-        let max_video_frame_size = u32::from_le_bytes([data[18], data[19], data[20], data[21]]);
-        let max_payload_transfer_size =
-            u32::from_le_bytes([data[22], data[23], data[24], data[25]]);
-
-        debug!(
-            "Parsed stream control: format={format_index}, frame={frame_index}, \
-             interval={frame_interval}, max_frame_size={max_video_frame_size}"
-        );
-
-        Ok(StreamControl {
-            hint,
-            format_index,
-            frame_index,
-            frame_interval,
-            key_frame_rate,
-            p_frame_rate,
-            comp_quality,
-            comp_window_size,
-            delay,
-            max_video_frame_size,
-            max_payload_transfer_size,
-        })
-    }
-
-    // /// 获取当前的 Stream Control 参数
     // async fn get_current_stream_control(&mut self) -> Result<StreamControl, USBError> {
     //     // 发送 GET_CUR 请求获取当前的 commit 参数
     //     debug!("Getting current stream control parameters");
