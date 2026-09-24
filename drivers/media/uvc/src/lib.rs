@@ -104,21 +104,6 @@ pub(crate) enum VideoFormatType {
     Mjpeg,
 }
 
-impl From<u32> for VideoFormatType {
-    fn from(value: u32) -> Self {
-        match value {
-            format::PIX_FMT_YUYV => VideoFormatType::Uncompressed(UncompressedFormat::Yuyv),
-            format::PIX_FMT_UYVY => VideoFormatType::Uncompressed(UncompressedFormat::Uyvy),
-            format::PIX_FMT_NV12 => VideoFormatType::Uncompressed(UncompressedFormat::Nv12),
-            format::PIX_FMT_GREY => VideoFormatType::Uncompressed(UncompressedFormat::Grey),
-            format::PIX_FMT_BGR24 => VideoFormatType::Uncompressed(UncompressedFormat::Bgr24),
-            format::PIX_FMT_XBGR32 => VideoFormatType::Uncompressed(UncompressedFormat::Xbgr32),
-            format::PIX_FMT_MJPEG => VideoFormatType::Mjpeg,
-            _ => VideoFormatType::Uncompressed(UncompressedFormat::Yuyv),
-        }
-    }
-}
-
 impl VideoFormat {
     /// Bytes per line.
     pub(crate) fn bytes_per_line(&self) -> usize {
@@ -266,6 +251,12 @@ pub(crate) struct IsoStreamWorker {
     stop: Arc<IsoStop>,
 }
 
+pub(crate) struct NegotiatedFormat {
+    pub control: StreamControl,
+    pub format_index: usize,
+    pub alt_index: usize,
+}
+
 pub struct UvcDevice<H: UvcHandle, M: VbMemOps + 'static> {
     handle: Arc<H>,
     runtime: Arc<dyn UvcRuntime>,
@@ -393,7 +384,47 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
         format: VideoFormat,
         interval: Option<u32>,
     ) -> Result<(), USBError> {
-        let (mut requested, pos) = self.build_stream_control(&format)?;
+        let negotiated = self.probe_stream_control(&format, interval)?;
+        let accepted = negotiated.control;
+        let accepted_pos = negotiated.format_index;
+        let alt = negotiated.alt_index;
+        if self.pool.num_buffers() != 0 {
+            let allocated = self
+                .pool
+                .buffer_snapshot(0)
+                .and_then(|buffer| buffer.planes.first().map(|plane| plane.length))
+                .ok_or(USBError::InvalidParameter)?;
+            if accepted.max_video_frame_size > allocated {
+                return Err(USBError::InvalidParameter);
+            }
+        }
+        info!(
+            "[UVC] PROBE: accepted_format={} interval={} max_frame={} max_payload={} alt={}",
+            accepted_pos,
+            accepted.frame_interval,
+            accepted.max_video_frame_size,
+            accepted.max_payload_transfer_size,
+            alt
+        );
+        self.active_format = accepted_pos;
+        if accepted.max_video_frame_size != 0 {
+            self.formats[accepted_pos].max_frame_size = self.formats[accepted_pos]
+                .max_frame_size
+                .max(accepted.max_video_frame_size);
+        }
+        self.active_alt_setting = alt;
+        *self.cur_frame_interval.lock() = accepted.frame_interval;
+        self.probed_control = Some(accepted);
+        Ok(())
+    }
+
+    /// Negotiate a format without changing the driver's active format.
+    pub(crate) fn probe_stream_control(
+        &self,
+        format: &VideoFormat,
+        interval: Option<u32>,
+    ) -> Result<NegotiatedFormat, USBError> {
+        let mut requested = self.build_stream_control(format);
         if let Some(interval) = interval {
             requested.frame_interval = interval;
         }
@@ -411,41 +442,16 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
         if accepted.frame_interval == 0 {
             return Err(USBError::InvalidParameter);
         }
-        if self.pool.num_buffers() != 0 {
-            let allocated = self
-                .pool
-                .buffer_snapshot(0)
-                .and_then(|buffer| buffer.planes.first().map(|plane| plane.length))
-                .ok_or(USBError::InvalidParameter)?;
-            if accepted.max_video_frame_size > allocated {
-                return Err(USBError::InvalidParameter);
-            }
-        }
         let payload = accepted.max_payload_transfer_size as usize;
         let alt = self.select_alt_index(payload);
         if self.alt_settings[alt].buf_len() < payload {
             return Err(USBError::InvalidParameter);
         }
-        info!(
-            "[UVC] PROBE: requested_format={} accepted_format={} interval={} max_frame={} \
-             max_payload={} alt={}",
-            pos,
-            accepted_pos,
-            accepted.frame_interval,
-            accepted.max_video_frame_size,
-            accepted.max_payload_transfer_size,
-            alt
-        );
-        self.active_format = accepted_pos;
-        if accepted.max_video_frame_size != 0 {
-            self.formats[accepted_pos].max_frame_size = self.formats[accepted_pos]
-                .max_frame_size
-                .max(accepted.max_video_frame_size);
-        }
-        self.active_alt_setting = alt;
-        *self.cur_frame_interval.lock() = accepted.frame_interval;
-        self.probed_control = Some(accepted);
-        Ok(())
+        Ok(NegotiatedFormat {
+            control: accepted,
+            format_index: accepted_pos,
+            alt_index: alt,
+        })
     }
 
     pub(crate) fn start_streaming(&mut self) -> Result<(), USBError> {
@@ -565,7 +571,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
     }
 
     fn send_vs_control(
-        &mut self,
+        &self,
         control_selector: u8,
         stream_ctrl: &StreamControl,
     ) -> Result<(), USBError> {
@@ -593,7 +599,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
         Ok(())
     }
 
-    fn get_vs_control(&mut self, control_selector: u8, length: usize) -> Result<Vec<u8>, USBError> {
+    fn get_vs_control(&self, control_selector: u8, length: usize) -> Result<Vec<u8>, USBError> {
         let vs_interface_num = self.vs_iface_num;
 
         let setup = ControlSetup {
@@ -622,92 +628,33 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
         Ok(buffer)
     }
 
-    /// Build stream control.
-    fn build_stream_control(
-        &self,
-        format: &VideoFormat,
-    ) -> Result<(StreamControl, usize), USBError> {
-        let pos = self.find_format_index(format).ok_or_else(|| {
-            warn!("Failed to find matching format for: {format:?}");
-            anyhow!("No matching format found")
-        })?;
-        let negotiated = &self.formats[pos];
-        let format_index = negotiated.format_index;
-        let frame_index = negotiated.frame_index;
-        info!(
-            "Found format_index={} frame_index={} for format: {format:?} at pos={}",
-            format_index, frame_index, pos
-        );
-
-        let frame_interval = if negotiated.default_interval != 0 {
-            negotiated.default_interval
+    /// Build stream control for an already selected descriptor frame.
+    fn build_stream_control(&self, format: &VideoFormat) -> StreamControl {
+        let frame_interval = if format.default_interval != 0 {
+            format.default_interval
         } else {
-            match &negotiated.intervals {
+            match &format.intervals {
                 FrameIntervals::Discrete(v) if !v.is_empty() => v[0],
                 FrameIntervals::Continuous { min, .. } => *min,
                 _ => 333_333,
             }
         };
 
-        let max_frame_size = negotiated.max_frame_size;
-
-        Ok((
-            StreamControl {
-                hint: 0x0001,
-                format_index,
-                frame_index,
-                frame_interval,
-                key_frame_rate: 0,
-                p_frame_rate: 0,
-                comp_quality: 0,
-                comp_window_size: 0,
-                delay: 0,
-                max_video_frame_size: max_frame_size,
-                max_payload_transfer_size: 0,
-                extension: [0; 22],
-                wire_len: self.stream_control_len,
-            },
-            pos,
-        ))
-    }
-
-    /// Find format index.
-    fn find_format_index(&self, target: &VideoFormat) -> Option<usize> {
-        for (idx, format) in self.formats.iter().enumerate() {
-            if format.format_type != target.format_type {
-                continue;
-            }
-
-            if let (
-                VideoFormatType::Uncompressed(format_type),
-                VideoFormatType::Uncompressed(target_type),
-            ) = (&format.format_type, &target.format_type)
-                && format_type != target_type
-            {
-                continue;
-            }
-
-            if format.width == target.width && format.height == target.height {
-                debug!(
-                    "Found matching format: pos={} format_index={}, frame_index={}",
-                    idx, format.format_index, format.frame_index
-                );
-                return Some(idx);
-            }
+        StreamControl {
+            hint: 0x0001,
+            format_index: format.format_index,
+            frame_index: format.frame_index,
+            frame_interval,
+            key_frame_rate: 0,
+            p_frame_rate: 0,
+            comp_quality: 0,
+            comp_window_size: 0,
+            delay: 0,
+            max_video_frame_size: format.max_frame_size,
+            max_payload_transfer_size: 0,
+            extension: [0; 22],
+            wire_len: self.stream_control_len,
         }
-
-        for (idx, format) in self.formats.iter().enumerate() {
-            if format.format_type == target.format_type {
-                info!(
-                    "Using fallback format: pos={} format_index={}, frame_index={}",
-                    idx, format.format_index, format.frame_index
-                );
-                return Some(idx);
-            }
-        }
-
-        debug!("No matching format found, using default indices");
-        None
     }
 
     fn select_alt_index(&self, payload: usize) -> usize {
@@ -746,6 +693,34 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
         }
         best
     }
+}
+
+/// Match Linux UVC's non-overlapping image area metric for TRY_FMT/S_FMT.
+fn select_format_index(
+    formats: &[VideoFormat],
+    pixel_format: u32,
+    width: u16,
+    height: u16,
+) -> Option<usize> {
+    let selected = formats
+        .iter()
+        .find(|format| format.pixelformat() == pixel_format)
+        .or_else(|| formats.first())?;
+    let requested_area = u64::from(width) * u64::from(height);
+    formats
+        .iter()
+        .enumerate()
+        .filter(|(_, format)| {
+            format.pixelformat() == selected.pixelformat()
+                && format.format_index == selected.format_index
+        })
+        .min_by_key(|(_, format)| {
+            let frame_width = u64::from(format.width);
+            let frame_height = u64::from(format.height);
+            let overlap = frame_width.min(u64::from(width)) * frame_height.min(u64::from(height));
+            frame_width * frame_height + requested_area - 2 * overlap
+        })
+        .map(|(index, _)| index)
 }
 
 impl<H: UvcHandle, M: VbMemOps + 'static> Drop for UvcDevice<H, M> {
@@ -807,5 +782,63 @@ pub(crate) fn uvc_try_frame_interval(format: &VideoFormat, interval: u32) -> u32
                     * u64::from(step);
             rounded.min(u64::from(max)) as u32
         }
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn non_exact_size_selects_closest_frame_of_requested_pixel_format() {
+        let formats = [(160, 120), (640, 480), (1280, 720)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (width, height))| VideoFormat {
+                format_type: VideoFormatType::Mjpeg,
+                width,
+                height,
+                format_index: 1,
+                frame_index: index as u8 + 1,
+                default_interval: 333_333,
+                intervals: FrameIntervals::Discrete(Vec::new()),
+                max_frame_size: width as u32 * height as u32,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            select_format_index(&formats, format::PIX_FMT_MJPEG, 600, 450),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn same_pixel_format_does_not_cross_format_descriptors() {
+        let formats = [
+            VideoFormat {
+                format_type: VideoFormatType::Mjpeg,
+                width: 160,
+                height: 120,
+                format_index: 1,
+                frame_index: 1,
+                default_interval: 333_333,
+                intervals: FrameIntervals::Discrete(Vec::new()),
+                max_frame_size: 160 * 120,
+            },
+            VideoFormat {
+                format_type: VideoFormatType::Mjpeg,
+                width: 640,
+                height: 480,
+                format_index: 2,
+                frame_index: 1,
+                default_interval: 333_333,
+                intervals: FrameIntervals::Discrete(Vec::new()),
+                max_frame_size: 640 * 480,
+            },
+        ];
+        assert_eq!(
+            select_format_index(&formats, format::PIX_FMT_MJPEG, 640, 480),
+            Some(0)
+        );
     }
 }

@@ -53,6 +53,15 @@ int main(void) {
            (desc.pixelformat >> 8) & 255, (desc.pixelformat >> 16) & 255,
            (desc.pixelformat >> 24) & 255);
 
+    struct v4l2_format trial = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
+    trial.fmt.pix.width = 639;
+    trial.fmt.pix.height = 479;
+    trial.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+    check_ioctl(fd, VIDIOC_TRY_FMT, &trial, "TRY_FMT");
+    if (trial.fmt.pix.pixelformat != V4L2_PIX_FMT_MJPEG ||
+        trial.fmt.pix.width != 640 || trial.fmt.pix.height != 480 ||
+        !trial.fmt.pix.sizeimage) die("TRY_FMT_result");
+
     struct v4l2_format format = {.type = V4L2_BUF_TYPE_VIDEO_CAPTURE};
     format.fmt.pix.width = 640;
     format.fmt.pix.height = 480;

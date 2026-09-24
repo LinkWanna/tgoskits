@@ -24,10 +24,6 @@ use log::*;
 
 use crate::{FrameIntervals, UvcDevice, UvcHandle, VideoFormat};
 
-#[allow(dead_code)]
-const PIX_FMT_MJPEG: u32 = 0x47504a4d;
-const PIX_FMT_YUYV: u32 = 0x56595559;
-
 fn claim_video_interfaces<H: UvcHandle>(handle: &H, vc: u8, vs: u8) -> ax_media::Result<()> {
     handle.claim_interface(vc, 0).map_err(|_| V4l2Error::Busy)?;
     if let Err(error) = handle.claim_interface(vs, 0) {
@@ -117,9 +113,8 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
         let mut seen = Vec::new();
         let mut uniq: Vec<&VideoFormat> = Vec::new();
         for fmt in &self.formats {
-            let pf = fmt.pixelformat();
-            if !seen.contains(&pf) {
-                seen.push(pf);
+            if !seen.contains(&fmt.format_index) {
+                seen.push(fmt.format_index);
                 uniq.push(fmt);
             }
         }
@@ -145,94 +140,79 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
     }
 
     fn enum_framesizes(&self, f: &mut FrameSizeEnum) -> ax_media::Result<()> {
-        let pixel_format = f.pixel_format;
-        let matching: Vec<&VideoFormat> = self
+        let selected = self
             .formats
             .iter()
-            .filter(|fmt| fmt.pixelformat() == pixel_format)
-            .collect();
-        if matching.is_empty() {
-            return Err(V4l2Error::InvalidArgument);
-        }
-        let format = matching
-            .get(f.index as usize)
+            .find(|format| format.pixelformat() == f.pixel_format)
             .ok_or(V4l2Error::InvalidArgument)?;
-        f.ty = FrameSizeType::DISCRETE;
-        f.size.discrete.width = format.width as u32;
-        f.size.discrete.height = format.height as u32;
-        f.reserved = [0; 2];
-        Ok(())
+        let mut index = f.index;
+        let mut previous_size = None;
+        for format in self.formats.iter().filter(|format| {
+            format.format_index == selected.format_index
+                && format.pixelformat() == selected.pixelformat()
+        }) {
+            let size = (format.width, format.height);
+            if previous_size == Some(size) {
+                continue;
+            }
+            previous_size = Some(size);
+            if index == 0 {
+                f.ty = FrameSizeType::DISCRETE;
+                f.size.discrete.width = format.width as u32;
+                f.size.discrete.height = format.height as u32;
+                f.reserved = [0; 2];
+                return Ok(());
+            }
+            index -= 1;
+        }
+        Err(V4l2Error::InvalidArgument)
     }
 
     fn enum_frameintervals(&self, f: &mut FrameIntervalEnum) -> ax_media::Result<()> {
-        // Linux `uvc_ioctl_enum_frameintervals` enumerates per-format, per-size
-        // intervals: discrete intervals are indexed via `fival->index`, continuous
-        // is reported as stepwise with index 0 only.
-        let matching: Vec<&VideoFormat> = self
+        let selected = self
             .formats
             .iter()
-            .filter(|fmt| {
-                fmt.pixelformat() == f.pixel_format
-                    && fmt.width as u32 == f.width
-                    && fmt.height as u32 == f.height
-            })
-            .collect();
-        if matching.is_empty() {
-            return Err(V4l2Error::InvalidArgument);
-        }
-
-        // Aggregate discrete intervals across matching frames like Linux does
-        // (it loops over frames with same w/h and decrements index).
-        // For simplicity we support the common case where each resolution has a
-        // single VideoFormat entry; if there are multiple entries for the same
-        // resolution, we flatten their discrete intervals.
-        // First, handle continuous (bFrameIntervalType==0) – only one entry.
-        let first = matching[0];
-        if let FrameIntervals::Continuous { min, max, step } = &first.intervals {
-            if f.index != 0 {
-                return Err(V4l2Error::InvalidArgument);
+            .find(|format| format.pixelformat() == f.pixel_format)
+            .ok_or(V4l2Error::InvalidArgument)?;
+        let mut index = f.index as usize;
+        for format in self.formats.iter().filter(|format| {
+            format.format_index == selected.format_index
+                && format.pixelformat() == selected.pixelformat()
+                && format.width as u32 == f.width
+                && format.height as u32 == f.height
+        }) {
+            match &format.intervals {
+                FrameIntervals::Discrete(intervals) => {
+                    let count = intervals.len().max(1);
+                    if index >= count {
+                        index -= count;
+                        continue;
+                    }
+                    let interval = intervals.get(index).copied().unwrap_or_else(|| {
+                        if format.default_interval != 0 {
+                            format.default_interval
+                        } else {
+                            333_333
+                        }
+                    });
+                    f.ty = FrameIntervalType::DISCRETE;
+                    f.interval.discrete = Fract::from_interval(interval);
+                }
+                FrameIntervals::Continuous { min, max, step } => {
+                    if index != 0 {
+                        index -= 1;
+                        continue;
+                    }
+                    f.ty = FrameIntervalType::STEPWISE;
+                    f.interval.stepwise.min = Fract::from_interval(*min);
+                    f.interval.stepwise.max = Fract::from_interval(*max);
+                    f.interval.stepwise.step = Fract::from_interval(*step);
+                }
             }
-            let min_f = Fract::from_interval(*min);
-            let max_f = Fract::from_interval(*max);
-            let step_f = Fract::from_interval(*step);
-            f.ty = FrameIntervalType::STEPWISE;
-            f.interval.stepwise.min = min_f;
-            f.interval.stepwise.max = max_f;
-            f.interval.stepwise.step = step_f;
             f.reserved = [0; 2];
             return Ok(());
         }
-
-        // Discrete: flatten all intervals from matching formats.
-        let mut flat: Vec<u32> = Vec::new();
-        for fmt in matching {
-            match &fmt.intervals {
-                FrameIntervals::Discrete(v) => {
-                    if v.is_empty() {
-                        let interval = if fmt.default_interval != 0 {
-                            fmt.default_interval
-                        } else {
-                            333_333u32
-                        };
-                        flat.push(interval);
-                    } else {
-                        flat.extend_from_slice(v);
-                    }
-                }
-                FrameIntervals::Continuous { min, .. } => {
-                    // Continuous should have been handled above; if mixed, use min.
-                    flat.push(*min);
-                }
-            }
-        }
-        let interval = flat
-            .get(f.index as usize)
-            .ok_or(V4l2Error::InvalidArgument)?;
-        let fract = Fract::from_interval(*interval);
-        f.ty = FrameIntervalType::DISCRETE;
-        f.interval.discrete = fract;
-        f.reserved = [0; 2];
-        Ok(())
+        Err(V4l2Error::InvalidArgument)
     }
 
     fn g_fmt(&self, f: &mut Format) -> ax_media::Result<()> {
@@ -266,35 +246,15 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
         }
         // SAFETY: `f.ty` is VideoCapture, so `pix` is active.
         let pix = unsafe { f.fmt.pix };
-        let width = pix.width as u16;
-        let height = pix.height as u16;
-        let mut pixelformat = pix.pixelformat;
-
-        if !self
-            .formats
-            .iter()
-            .any(|fmt| fmt.pixelformat() == pixelformat)
-        {
-            pixelformat = self
-                .formats
-                .first()
-                .map(|fmt| fmt.pixelformat())
-                .unwrap_or(PIX_FMT_YUYV);
-        }
-
-        let format = VideoFormat {
-            format_type: pixelformat.into(),
-            width,
-            height,
-            format_index: 0,
-            frame_index: 0,
-            default_interval: 0,
-            intervals: FrameIntervals::Discrete(Vec::new()),
-            max_frame_size: 0,
-        };
-
-        self.set_format(format)
-            .map_err(|_| V4l2Error::InvalidArgument)?;
+        let index = crate::select_format_index(
+            &self.formats,
+            pix.pixelformat,
+            pix.width as u16,
+            pix.height as u16,
+        )
+        .ok_or(V4l2Error::InvalidArgument)?;
+        self.set_format(self.formats[index].clone())
+            .map_err(|_| V4l2Error::Io)?;
 
         let current = self.active_format_ref();
         f.fmt.pix.width = current.width as u32;
@@ -318,54 +278,26 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
         }
         // SAFETY: `f.ty` is VideoCapture, so `pix` is active.
         let pix = unsafe { f.fmt.pix };
-        let mut pixelformat = pix.pixelformat;
-        if !self
-            .formats
-            .iter()
-            .any(|fmt| fmt.pixelformat() == pixelformat)
-        {
-            pixelformat = self
-                .formats
-                .first()
-                .map(|fmt| fmt.pixelformat())
-                .unwrap_or(PIX_FMT_YUYV);
-        }
-        let negotiated = self
-            .formats
-            .iter()
-            .find(|fmt| {
-                fmt.pixelformat() == pixelformat
-                    && fmt.width as u32 == pix.width
-                    && fmt.height as u32 == pix.height
-            })
-            .or_else(|| {
-                self.formats
-                    .iter()
-                    .find(|fmt| fmt.pixelformat() == pixelformat)
-            });
-        let (w, h, sizeimage, bytesperline, colorspace) = match negotiated {
-            Some(fmt) => (
-                fmt.width as u32,
-                fmt.height as u32,
-                fmt.max_frame_size,
-                fmt.bytes_per_line() as u32,
-                fmt.colorspace(),
-            ),
-            None => (
-                pix.width.clamp(160, 1920),
-                pix.height.clamp(120, 1080),
-                pix.width * pix.height * 2,
-                0,
-                colorspace::Colorspace::SRGB,
-            ),
-        };
-        f.fmt.pix.width = w;
-        f.fmt.pix.height = h;
-        f.fmt.pix.pixelformat = pixelformat;
+        let index = crate::select_format_index(
+            &self.formats,
+            pix.pixelformat,
+            pix.width as u16,
+            pix.height as u16,
+        )
+        .ok_or(V4l2Error::InvalidArgument)?;
+        let probed = self
+            .probe_stream_control(&self.formats[index], None)
+            .map_err(|_| V4l2Error::Io)?;
+        let format = &self.formats[probed.format_index];
+        f.fmt.pix.width = format.width as u32;
+        f.fmt.pix.height = format.height as u32;
+        f.fmt.pix.pixelformat = format.pixelformat();
         f.fmt.pix.field = Field::NO_FIELD;
-        f.fmt.pix.bytesperline = bytesperline;
-        f.fmt.pix.sizeimage = sizeimage;
-        f.fmt.pix.colorspace = colorspace;
+        f.fmt.pix.bytesperline = format.bytes_per_line() as u32;
+        f.fmt.pix.sizeimage = format
+            .max_frame_size
+            .max(probed.control.max_video_frame_size);
+        f.fmt.pix.colorspace = format.colorspace();
         f.fmt.pix.priv_data = 0;
         f.fmt.pix.flags = 0;
         f.fmt.pix.ycbcr_enc = colorspace::YcbcrEncoding::Default as u32;
