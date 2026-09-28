@@ -57,7 +57,7 @@ fn uvc_wire_range(size: usize, signed: bool) -> Option<(i64, i64)> {
         (1, true) => Some((i8::MIN as i64, i8::MAX as i64)),
         (2, false) => Some((0, u16::MAX as i64)),
         (2, true) => Some((i16::MIN as i64, i16::MAX as i64)),
-        (4, false) => Some((0, u32::MAX as i64)),
+        (4, false) => Some((0, i32::MAX as i64)),
         (4, true) => Some((i32::MIN as i64, i32::MAX as i64)),
         _ => None,
     }
@@ -435,6 +435,12 @@ fn register_control<H: UvcHandle>(
                 };
                 range
             };
+            // V4L2 integer controls expose signed 32-bit values.
+            let min = min.max(i32::MIN as i64);
+            let max = max.min(i32::MAX as i64);
+            if min > max {
+                return;
+            }
             let step = if readable {
                 read(RequestCode::GetRes).unwrap_or(1).max(1)
             } else {
@@ -799,5 +805,29 @@ mod tests {
         ));
         ctrls.s_ctrl(&mut control).unwrap();
         assert_eq!(handle.current.load(Ordering::SeqCst), 42);
+
+        let wide_id = CameraClassCtrl::ExposureAbsolute as u32;
+        register_control(
+            &mut ctrls,
+            &handle,
+            0,
+            1,
+            &[0x08],
+            &UVC_CONTROL_CT_DEFS[2],
+            "CT",
+        );
+        let mut query = QueryCtrl {
+            id: wide_id,
+            ty: 0,
+            name: [0; 32],
+            minimum: 0,
+            maximum: 0,
+            step: 0,
+            default_value: 0,
+            flags: CtrlFlags::empty(),
+            reserved: [0; 2],
+        };
+        ctrls.queryctrl(&mut query).unwrap();
+        assert_eq!(query.maximum, i32::MAX);
     }
 }
