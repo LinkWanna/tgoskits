@@ -30,7 +30,7 @@ pub(crate) struct VcUnits {
 }
 
 /// Power line frequency menu.
-const POWER_LINE_FREQ_MENU: &[&str] = &["Disabled", "50 Hz", "60 Hz"];
+static POWER_LINE_FREQ_MENU: [&str; 4] = ["Disabled", "50 Hz", "60 Hz", "Auto"];
 
 /// Exposure auto menu.
 const EXPOSURE_AUTO_MENU: &[&str] = &[
@@ -48,6 +48,13 @@ fn exposure_auto_index(raw: i64) -> Option<i64> {
         .iter()
         .position(|&mode| mode == raw)
         .map(|index| index as i64)
+}
+
+fn menu_value_supported(mask: u64, raw: i64) -> bool {
+    u32::try_from(raw)
+        .ok()
+        .and_then(|index| 1u64.checked_shl(index))
+        .is_some_and(|bit| mask & bit != 0)
 }
 
 /// Representable range when a write-only control cannot report GET_MIN/MAX.
@@ -171,7 +178,7 @@ const UVC_CONTROL_PU_DEFS: &[UvcControlDef] = &[
         size: 1,
         signed: false,
         ctrl_bit: 10,
-        ty: UvcCtrlType::Menu(POWER_LINE_FREQ_MENU),
+        ty: UvcCtrlType::Menu(&POWER_LINE_FREQ_MENU),
     },
     UvcControlDef {
         cid: UserClassCtrl::HueAuto as u32,
@@ -303,6 +310,7 @@ fn register_control<H: UvcHandle>(
     unit_id: u8,
     bitmap: &[u8],
     def: &UvcControlDef,
+    uvc_version: u16,
     log_tag: &str,
 ) {
     let cid_raw = def.cid;
@@ -366,6 +374,45 @@ fn register_control<H: UvcHandle>(
         }
     };
 
+    let power_line_mask = if cid_raw == UserClassCtrl::PowerLineFrequency as u32 {
+        let Some(current) = read(RequestCode::GetCur).and_then(|raw| u8::try_from(raw).ok()) else {
+            return;
+        };
+        let mut supported = 0b0111u64;
+        if writable {
+            let set = |value: u8| {
+                let setup = ControlSetup {
+                    request_type: RequestType::Class,
+                    recipient: Recipient::Interface,
+                    request: RequestCode::SetCur.into(),
+                    value: (sel_raw as u16) << 8,
+                    index: ((unit_id as u16) << 8) | vc_iface as u16,
+                };
+                handle.control_out(setup, &[value]).is_ok()
+            };
+            if set(0) {
+                if uvc_version >= 0x150 && set(3) {
+                    supported |= 1 << 3;
+                }
+            } else {
+                supported &= !1;
+            }
+            // A failed restore does not invalidate the menu; G_CTRL reads the live value.
+            if !set(current) {
+                log::warn!("uvc: failed to restore {log_tag} {name} after capability probe");
+            }
+        } else if uvc_version >= 0x150 && (current == 3 || read(RequestCode::GetDef) == Some(3)) {
+            supported |= 1 << 3;
+        }
+        if !menu_value_supported(supported, current.into()) {
+            log::warn!("uvc: skip {log_tag} {name}: current value {current} is not settable");
+            return;
+        }
+        Some(supported)
+    } else {
+        None
+    };
+
     let h = handle.clone();
     let get_fn: CtrlGetFn = Box::new(move || {
         let mut buf = vec![0u8; size];
@@ -385,6 +432,10 @@ fn register_control<H: UvcHandle>(
         let raw = decode_uvc_value(&buf, signed).ok_or(ax_media::V4l2Error::Io)?;
         if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
             exposure_auto_index(raw).ok_or(ax_media::V4l2Error::Io)
+        } else if let Some(mask) = power_line_mask {
+            menu_value_supported(mask, raw)
+                .then_some(raw)
+                .ok_or(ax_media::V4l2Error::Io)
         } else {
             Ok(raw)
         }
@@ -462,7 +513,7 @@ fn register_control<H: UvcHandle>(
             ctrls.new_bool(cid_raw, name, default != 0, Some(ops))
         }
         UvcCtrlType::Menu(qmenu) => {
-            let (default_idx, skipped) = if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
+            let (qmenu, default_idx, skipped) = if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
                 let supported = if readable {
                     read(RequestCode::GetRes)
                         .or_else(|| read(RequestCode::GetMax))
@@ -494,14 +545,34 @@ fn register_control<H: UvcHandle>(
                 } else {
                     first_supported as u32
                 };
-                (default_idx, skipped)
+                (qmenu, default_idx, skipped)
+            } else if let Some(mask) = power_line_mask {
+                let qmenu: &'static [&'static str] = if menu_value_supported(mask, 3) {
+                    &POWER_LINE_FREQ_MENU
+                } else {
+                    &POWER_LINE_FREQ_MENU[..3]
+                };
+                let first_supported = (0..qmenu.len())
+                    .find(|index| menu_value_supported(mask, *index as i64))
+                    .unwrap_or(0);
+                let default = match read(RequestCode::GetDef) {
+                    Some(value) if menu_value_supported(mask, value) => value as u32,
+                    Some(value) => {
+                        log::warn!(
+                            "uvc: skip {log_tag} {name}: default value {value} is not settable"
+                        );
+                        return;
+                    }
+                    None => first_supported as u32,
+                };
+                (qmenu, default, !mask & ((1u64 << qmenu.len()) - 1))
             } else {
                 let default = if readable {
                     read(RequestCode::GetDef).unwrap_or(0)
                 } else {
                     0
                 };
-                ((default as u32).min(qmenu.len() as u32 - 1), 0)
+                (qmenu, (default as u32).min(qmenu.len() as u32 - 1), 0)
             };
             let res = ctrls.new_menu(
                 cid_raw,
@@ -570,6 +641,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
                     unit_id,
                     &units.processing_controls,
                     def,
+                    self.uvc_version,
                     "PU",
                 );
             }
@@ -583,6 +655,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
                     unit_id,
                     &units.camera_controls,
                     def,
+                    self.uvc_version,
                     "CT",
                 );
             }
@@ -673,6 +746,7 @@ mod tests {
             1,
             &[0x02],
             &UVC_CONTROL_CT_DEFS[0],
+            0x110,
             "CT",
         );
 
@@ -731,6 +805,7 @@ mod tests {
             1,
             &[0x02],
             &UVC_CONTROL_CT_DEFS[0],
+            0x110,
             "CT",
         );
         for index in 2..4 {
@@ -757,6 +832,7 @@ mod tests {
                 1,
                 &[0x02],
                 &UVC_CONTROL_CT_DEFS[0],
+                0x110,
                 "CT",
             );
             let mut access = QueryCtrl { id, ..query };
@@ -796,6 +872,7 @@ mod tests {
             2,
             &[1],
             &UVC_CONTROL_PU_DEFS[0],
+            0x110,
             "PU",
         );
         let mut control = Control { id, value: 42 };
@@ -814,6 +891,7 @@ mod tests {
             1,
             &[0x08],
             &UVC_CONTROL_CT_DEFS[2],
+            0x110,
             "CT",
         );
         let mut query = QueryCtrl {
@@ -829,5 +907,167 @@ mod tests {
         };
         ctrls.queryctrl(&mut query).unwrap();
         assert_eq!(query.maximum, i32::MAX);
+    }
+
+    struct PowerLineHandle {
+        current: AtomicU8,
+        default: u8,
+        supports_auto: bool,
+        fail_restore: bool,
+        writes: AtomicU8,
+    }
+
+    impl UvcHandle for PowerLineHandle {
+        fn claim_interface(&self, _: u8, _: u8) -> Result<(), USBError> {
+            Ok(())
+        }
+
+        fn release_interface(&self, _: u8) -> Result<(), USBError> {
+            Ok(())
+        }
+
+        fn control_in(&self, setup: ControlSetup, data: &mut [u8]) -> Result<usize, USBError> {
+            data[0] = match setup.request {
+                crab_usb::usb_if::transfer::Request::Other(0x86) => 3,
+                crab_usb::usb_if::transfer::Request::Other(0x87) => self.default,
+                crab_usb::usb_if::transfer::Request::Other(0x81) => {
+                    self.current.load(Ordering::SeqCst)
+                }
+                _ => return Err(USBError::NotSupported),
+            };
+            Ok(1)
+        }
+
+        fn control_out(&self, setup: ControlSetup, data: &[u8]) -> Result<(), USBError> {
+            if !matches!(
+                setup.request,
+                crab_usb::usb_if::transfer::Request::ClearFeature
+            ) {
+                return Err(USBError::NotSupported);
+            }
+            if data[0] == 3 && !self.supports_auto {
+                return Err(USBError::NotSupported);
+            }
+            if self.fail_restore && self.writes.fetch_add(1, Ordering::SeqCst) == 2 {
+                return Err(USBError::NotSupported);
+            }
+            self.current.store(data[0], Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn submit_endpoint_transfer(
+            &self,
+            _: u8,
+            _: TransferRequest,
+        ) -> Result<crate::IsoPending, USBError> {
+            Err(USBError::NotSupported)
+        }
+    }
+
+    #[test]
+    fn power_line_frequency_auto_is_queryable_and_settable() {
+        let id = UserClassCtrl::PowerLineFrequency as u32;
+        let handle = Arc::new(PowerLineHandle {
+            current: AtomicU8::new(3),
+            default: 3,
+            supports_auto: true,
+            fail_restore: false,
+            writes: AtomicU8::new(0),
+        });
+        let mut ctrls = ax_media::CtrlHandler::new();
+        register_control(
+            &mut ctrls,
+            &handle,
+            0,
+            2,
+            &[0, 0b100],
+            &UVC_CONTROL_PU_DEFS[9],
+            0x150,
+            "PU",
+        );
+
+        let mut query = QueryCtrl {
+            id,
+            ty: 0,
+            name: [0; 32],
+            minimum: 0,
+            maximum: 0,
+            step: 0,
+            default_value: -1,
+            flags: CtrlFlags::empty(),
+            reserved: [0; 2],
+        };
+        ctrls.queryctrl(&mut query).unwrap();
+        assert_eq!(query.maximum, 3);
+        assert_eq!(query.default_value, 3);
+        let mut menu = Querymenu {
+            id,
+            index: 3,
+            name: [0; 32],
+            reserved: 0,
+        };
+        ctrls.querymenu(&mut menu).unwrap();
+        assert_eq!(&menu.name[..4], b"Auto");
+        let mut get = Control { id, value: -1 };
+        ctrls.g_ctrl(&mut get).unwrap();
+        assert_eq!(get.value, 3);
+        let mut set = Control { id, value: 3 };
+        ctrls.s_ctrl(&mut set).unwrap();
+        assert_eq!(handle.current.load(Ordering::SeqCst), 3);
+
+        for (version, supports_auto) in [(0x150, false), (0x110, true)] {
+            let handle = Arc::new(PowerLineHandle {
+                current: AtomicU8::new(1),
+                default: 1,
+                supports_auto,
+                fail_restore: false,
+                writes: AtomicU8::new(0),
+            });
+            let mut ctrls = ax_media::CtrlHandler::new();
+            register_control(
+                &mut ctrls,
+                &handle,
+                0,
+                2,
+                &[0, 0b100],
+                &UVC_CONTROL_PU_DEFS[9],
+                version,
+                "PU",
+            );
+            assert_eq!(handle.current.load(Ordering::SeqCst), 1);
+            let mut limited = QueryCtrl { id, ..query };
+            ctrls.queryctrl(&mut limited).unwrap();
+            assert_eq!(limited.maximum, 2);
+            let mut auto = Querymenu { id, ..menu };
+            assert!(ctrls.querymenu(&mut auto).is_err());
+            let mut set = Control { id, value: 3 };
+            assert!(ctrls.s_ctrl(&mut set).is_err());
+            assert_eq!(handle.current.load(Ordering::SeqCst), 1);
+        }
+
+        let handle = Arc::new(PowerLineHandle {
+            current: AtomicU8::new(1),
+            default: 1,
+            supports_auto: true,
+            fail_restore: true,
+            writes: AtomicU8::new(0),
+        });
+        let mut ctrls = ax_media::CtrlHandler::new();
+        register_control(
+            &mut ctrls,
+            &handle,
+            0,
+            2,
+            &[0, 0b100],
+            &UVC_CONTROL_PU_DEFS[9],
+            0x150,
+            "PU",
+        );
+        let mut available = QueryCtrl { id, ..query };
+        ctrls.queryctrl(&mut available).unwrap();
+        assert_eq!(available.maximum, 3);
+        let mut get = Control { id, value: -1 };
+        ctrls.g_ctrl(&mut get).unwrap();
+        assert_eq!(get.value, 3);
     }
 }
