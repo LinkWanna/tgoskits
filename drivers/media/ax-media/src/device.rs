@@ -152,6 +152,7 @@ impl VideoDevice {
         {
             return Err(V4l2Error::Busy);
         }
+        let claim_owner = queue_op && !matches!(cmd, VideoIoctl::Modern(IoctlCmd::StreamOff));
         let was_unowned = if queue_op {
             let mut sessions = self.sessions.lock();
             if sessions
@@ -161,7 +162,7 @@ impl VideoDevice {
             {
                 return Err(V4l2Error::Busy);
             }
-            let vacant = sessions.owner.is_none();
+            let vacant = claim_owner && sessions.owner.is_none();
             if vacant {
                 // The weak owner does not extend this file's lifetime.
                 sessions.owner = Some(Arc::downgrade(file));

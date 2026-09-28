@@ -117,6 +117,7 @@ int main(void) {
 
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     check_ioctl(fd, VIDIOC_STREAMON, &type, "STREAMON");
+    check_ioctl(fd, VIDIOC_STREAMON, &type, "STREAMON_AGAIN");
     invalid.type = 0xffffffffu;
     invalid.memory = V4L2_MEMORY_MMAP;
     expect_einval(fd, VIDIOC_DQBUF, &invalid, "DQBUF_type");
@@ -153,6 +154,16 @@ int main(void) {
     for (unsigned i = 0; i < req.count; i++)
         if (munmap(mapped[i].ptr, mapped[i].length) < 0) die("munmap");
     free(mapped);
+    struct v4l2_requestbuffers release = {.count = 0,
+        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP};
+    check_ioctl(fd, VIDIOC_REQBUFS, &release, "REQBUFS_RELEASE");
+    int other = open(path, O_RDWR | O_NONBLOCK);
+    if (other < 0) die("open_other");
+    check_ioctl(other, VIDIOC_STREAMOFF, &type, "STREAMOFF_IDLE_OTHER");
+    struct v4l2_requestbuffers reacquire = {.count = 4,
+        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP};
+    check_ioctl(fd, VIDIOC_REQBUFS, &reacquire, "REQBUFS_REACQUIRE");
+    close(other);
     close(fd);
     printf("STARRY_UVC_V4L2_OK frames=%u bytes=%lu\n", frames, bytes);
     return 0;

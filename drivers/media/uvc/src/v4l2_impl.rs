@@ -422,6 +422,9 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
         if ty != BufType::VIDEO_CAPTURE {
             return Err(V4l2Error::InvalidArgument);
         }
+        if self.pool.is_streaming() {
+            return Ok(());
+        }
         self.pool.streamon()?;
         if let Err(e) = self.start_streaming().map_err(|_| V4l2Error::Io) {
             self.pool.streamoff();

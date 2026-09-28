@@ -109,17 +109,26 @@ fn handle_vs_block(
             Colorformat => {
                 debug!("VS Colorformat ignored");
             }
-            FormatUncompressed | FormatMjpeg => {
+            FormatUncompressed | FormatMjpeg | FormatMpeg2Ts | FormatDv | FormatFrameBased
+            | FormatStreamBased | FormatH264 | FormatH264Simulcast => {
                 let header = header.as_ref().unwrap();
                 format_count += 1;
                 cur_format = None;
-                if format_count > header.num_formats as usize || desc.len() < 4 || desc[3] == 0 {
+                if format_count > header.num_formats as usize {
                     return Err(anyhow!(
                         "VS Format count {} exceeds bNumFormats {}",
                         format_count,
                         header.num_formats
                     )
                     .into());
+                }
+                if !matches!(subtype, FormatUncompressed | FormatMjpeg) {
+                    debug!("VS unsupported format {subtype:?} ignored");
+                    consumed += len;
+                    continue;
+                }
+                if desc.len() < 4 || desc[3] == 0 {
+                    return Err(anyhow!("VS supported Format descriptor has no valid index").into());
                 }
                 let format_type = match subtype {
                     FormatUncompressed => {
@@ -168,20 +177,8 @@ fn handle_vs_block(
                 // Still-image capture is optional and does not affect video frames.
                 debug!("VS StillImageFrame ignored");
             }
-            FormatMpeg2Ts => {
-                return Err(anyhow!("UVC VideoStreaming MPEG-2 TS format not supported").into());
-            }
-            FormatDv => {
-                return Err(anyhow!("UVC VideoStreaming DV format not supported").into());
-            }
-            FormatFrameBased | FrameFrameBased => {
-                return Err(anyhow!("UVC VideoStreaming Frame-Based format not supported").into());
-            }
-            FormatStreamBased => {
-                return Err(anyhow!("UVC VideoStreaming Stream-Based format not supported").into());
-            }
-            FormatH264 | FrameH264 | FormatH264Simulcast => {
-                return Err(anyhow!("UVC VideoStreaming H.264 format not supported").into());
+            FrameFrameBased | FrameH264 => {
+                debug!("VS unsupported frame {subtype:?} ignored");
             }
         }
         consumed += len;
@@ -678,6 +675,42 @@ mod tests {
         assert_eq!(formats.len(), 2);
         assert_eq!((formats[0].format_index, formats[0].width), (1, 640));
         assert_eq!((formats[1].format_index, formats[1].width), (3, 1280));
+    }
+
+    #[test]
+    fn supported_formats_survive_an_unsupported_h264_format() {
+        let mut blob = build_uvc_blob(0x01, 0x02);
+        let header = blob
+            .windows(4)
+            .position(|bytes| bytes == [13, 0x24, 0x01, 1])
+            .unwrap();
+        blob[header + 3] = 3;
+        let frame = blob
+            .windows(5)
+            .position(|bytes| bytes == [26, 0x24, 0x05, 1, 0])
+            .unwrap();
+        let mut mjpeg_frame = blob[frame..frame + 26].to_vec();
+        mjpeg_frame[2] = 0x07;
+        let mut stale_frame = mjpeg_frame.clone();
+        stale_frame[5..7].copy_from_slice(&800u16.to_le_bytes());
+        let next_interface = blob
+            .windows(9)
+            .position(|bytes| bytes == [9, 0x04, 3, 1, 1, 0x0e, 0x02, 0, 0])
+            .unwrap();
+        blob.splice(
+            next_interface..next_interface,
+            [11, 0x24, 0x06, 2, 1, 0, 0, 0, 0, 0, 0]
+                .into_iter()
+                .chain(mjpeg_frame)
+                .chain([4, 0x24, 0x13, 3])
+                .chain(stale_frame),
+        );
+
+        let formats = parse_uvc_device(&blob).unwrap().formats;
+        assert_eq!(formats.len(), 2);
+        assert_eq!((formats[0].format_index, formats[0].width), (1, 640));
+        assert_eq!((formats[1].format_index, formats[1].width), (2, 640));
+        assert_eq!(formats[1].format_type, VideoFormatType::Mjpeg);
     }
 
     #[test]

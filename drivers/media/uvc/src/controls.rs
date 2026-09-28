@@ -34,11 +34,21 @@ const POWER_LINE_FREQ_MENU: &[&str] = &["Disabled", "50 Hz", "60 Hz"];
 
 /// Exposure auto menu.
 const EXPOSURE_AUTO_MENU: &[&str] = &[
-    "Manual Mode",
-    "Aperture Priority Mode",
-    "Shutter Priority Mode",
     "Auto Mode",
+    "Manual Mode",
+    "Shutter Priority Mode",
+    "Aperture Priority Mode",
 ];
+
+/// UVC CT_AE_MODE_CONTROL bit values in V4L2_EXPOSURE_* menu order.
+const EXPOSURE_AUTO_UVC_VALUES: [i64; 4] = [2, 1, 4, 8];
+
+fn exposure_auto_index(raw: i64) -> Option<i64> {
+    EXPOSURE_AUTO_UVC_VALUES
+        .iter()
+        .position(|&mode| mode == raw)
+        .map(|index| index as i64)
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,21 +281,6 @@ fn encode_uvc_value(v: i64, size: usize) -> Option<Vec<u8>> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::decode_uvc_value;
-
-    #[test]
-    fn control_signedness_preserves_high_unsigned_values() {
-        assert_eq!(decode_uvc_value(&[0x00, 0x80], false), Some(32768));
-        assert_eq!(decode_uvc_value(&[0x00, 0x80], true), Some(-32768));
-        assert_eq!(
-            decode_uvc_value(&[0x00, 0x00, 0x00, 0x80], false),
-            Some(2147483648)
-        );
-    }
-}
-
 /// Register a single control.
 #[allow(clippy::too_many_arguments)]
 fn register_control<H: UvcHandle>(
@@ -374,7 +369,7 @@ fn register_control<H: UvcHandle>(
         }
         let raw = decode_uvc_value(&buf, signed).ok_or(ax_media::V4l2Error::Io)?;
         if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
-            Ok(raw.trailing_zeros() as i64)
+            exposure_auto_index(raw).ok_or(ax_media::V4l2Error::Io)
         } else {
             Ok(raw)
         }
@@ -384,7 +379,9 @@ fn register_control<H: UvcHandle>(
     let set_fn: CtrlSetFn = Box::new(move |v| {
         let orig_v = v;
         let v = if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
-            1i64 << v
+            *EXPOSURE_AUTO_UVC_VALUES
+                .get(usize::try_from(v).map_err(|_| ax_media::V4l2Error::InvalidArgument)?)
+                .ok_or(ax_media::V4l2Error::InvalidArgument)?
         } else {
             v
         };
@@ -424,11 +421,34 @@ fn register_control<H: UvcHandle>(
             ctrls.new_bool(cid_raw, name, default != 0, Some(ops))
         }
         UvcCtrlType::Menu(qmenu) => {
-            let default = read(RequestCode::GetDef).unwrap_or(0);
-            let default_idx = if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
-                (default.trailing_zeros() as i64).clamp(0, qmenu.len() as i64 - 1) as u32
+            let (default_idx, skipped) = if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
+                let supported = read(RequestCode::GetRes)
+                    .or_else(|| read(RequestCode::GetMax))
+                    .unwrap_or(0x0f);
+                let skipped = EXPOSURE_AUTO_UVC_VALUES.iter().enumerate().fold(
+                    0u64,
+                    |mask, (index, mode)| {
+                        if (supported & *mode) == 0 {
+                            mask | (1u64 << index)
+                        } else {
+                            mask
+                        }
+                    },
+                );
+                let Some(first_supported) = (0..EXPOSURE_AUTO_UVC_VALUES.len())
+                    .find(|index| (skipped & (1u64 << index)) == 0)
+                else {
+                    return;
+                };
+                let default_idx = read(RequestCode::GetDef)
+                    .and_then(exposure_auto_index)
+                    .and_then(|index| u32::try_from(index).ok())
+                    .filter(|index| (skipped & (1u64 << index)) == 0)
+                    .unwrap_or(first_supported as u32);
+                (default_idx, skipped)
             } else {
-                (default as u32).min(qmenu.len() as u32 - 1)
+                let default = read(RequestCode::GetDef).unwrap_or(0);
+                ((default as u32).min(qmenu.len() as u32 - 1), 0)
             };
             let res = ctrls.new_menu(
                 cid_raw,
@@ -438,8 +458,8 @@ fn register_control<H: UvcHandle>(
                 qmenu,
                 Some(ops),
             );
-            if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
-                ctrls.set_step(cid_raw, (1u64 << 0) | (1u64 << 2));
+            if res.is_ok() && skipped != 0 {
+                ctrls.set_step(cid_raw, skipped);
             }
             res
         }
@@ -504,6 +524,158 @@ impl<H: UvcHandle, M: VbMemOps + 'static> UvcDevice<H, M> {
                     "CT",
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::sync::atomic::{AtomicU8, Ordering};
+
+    use ax_media::interface::ctrl::{Control, QueryCtrl, Querymenu};
+    use crab_usb::{err::USBError, usb_if::endpoint::TransferRequest};
+
+    use super::*;
+
+    #[test]
+    fn control_signedness_preserves_high_unsigned_values() {
+        assert_eq!(decode_uvc_value(&[0x00, 0x80], false), Some(32768));
+        assert_eq!(decode_uvc_value(&[0x00, 0x80], true), Some(-32768));
+        assert_eq!(
+            decode_uvc_value(&[0x00, 0x00, 0x00, 0x80], false),
+            Some(2147483648)
+        );
+    }
+
+    struct ExposureHandle {
+        current: AtomicU8,
+        supported: u8,
+    }
+
+    impl UvcHandle for ExposureHandle {
+        fn claim_interface(&self, _: u8, _: u8) -> Result<(), USBError> {
+            Ok(())
+        }
+
+        fn release_interface(&self, _: u8) -> Result<(), USBError> {
+            Ok(())
+        }
+
+        fn control_in(&self, setup: ControlSetup, data: &mut [u8]) -> Result<usize, USBError> {
+            data[0] = match setup.request {
+                crab_usb::usb_if::transfer::Request::Other(0x86) => 3,
+                crab_usb::usb_if::transfer::Request::Other(0x84) => self.supported,
+                crab_usb::usb_if::transfer::Request::Other(0x87) => 2,
+                crab_usb::usb_if::transfer::Request::Other(0x81) => {
+                    self.current.load(Ordering::SeqCst)
+                }
+                _ => return Err(USBError::NotSupported),
+            };
+            Ok(1)
+        }
+
+        fn control_out(&self, setup: ControlSetup, data: &[u8]) -> Result<(), USBError> {
+            if !matches!(
+                setup.request,
+                crab_usb::usb_if::transfer::Request::ClearFeature
+            ) {
+                return Err(USBError::NotSupported);
+            }
+            self.current.store(data[0], Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn submit_endpoint_transfer(
+            &self,
+            _: u8,
+            _: TransferRequest,
+        ) -> Result<crate::IsoPending, USBError> {
+            Err(USBError::NotSupported)
+        }
+    }
+
+    #[test]
+    fn exposure_auto_uses_v4l2_menu_order_and_uvc_mode_bits() {
+        let id = CameraClassCtrl::ExposureAuto as u32;
+        let handle = Arc::new(ExposureHandle {
+            current: AtomicU8::new(2),
+            supported: 0x0f,
+        });
+        let mut ctrls = ax_media::CtrlHandler::new();
+        register_control(
+            &mut ctrls,
+            &handle,
+            0,
+            1,
+            &[0x02],
+            &UVC_CONTROL_CT_DEFS[0],
+            "CT",
+        );
+
+        let mut query = QueryCtrl {
+            id,
+            ty: 0,
+            name: [0; 32],
+            minimum: 0,
+            maximum: 0,
+            step: 0,
+            default_value: -1,
+            flags: CtrlFlags::empty(),
+            reserved: [0; 2],
+        };
+        ctrls.queryctrl(&mut query).unwrap();
+        assert_eq!(query.default_value, 0);
+        let mut initial = Control { id, value: -1 };
+        ctrls.g_ctrl(&mut initial).unwrap();
+        assert_eq!(initial.value, 0);
+
+        for (index, name, raw) in [
+            (0, "Auto Mode", 2),
+            (1, "Manual Mode", 1),
+            (2, "Shutter Priority Mode", 4),
+            (3, "Aperture Priority Mode", 8),
+        ] {
+            let mut q = Querymenu {
+                id,
+                index,
+                name: [0; 32],
+                reserved: 0,
+            };
+            ctrls.querymenu(&mut q).unwrap();
+            assert_eq!(&q.name[..name.len()], name.as_bytes());
+            let mut set = Control {
+                id,
+                value: index as i32,
+            };
+            ctrls.s_ctrl(&mut set).unwrap();
+            assert_eq!(handle.current.load(Ordering::SeqCst), raw);
+            let mut get = Control { id, value: -1 };
+            ctrls.g_ctrl(&mut get).unwrap();
+            assert_eq!(get.value, index as i32);
+        }
+
+        let limited = Arc::new(ExposureHandle {
+            current: AtomicU8::new(2),
+            supported: 0x03,
+        });
+        let mut ctrls = ax_media::CtrlHandler::new();
+        register_control(
+            &mut ctrls,
+            &limited,
+            0,
+            1,
+            &[0x02],
+            &UVC_CONTROL_CT_DEFS[0],
+            "CT",
+        );
+        for index in 2..4 {
+            let mut q = Querymenu {
+                id,
+                index,
+                name: [0; 32],
+                reserved: 0,
+            };
+            assert!(ctrls.querymenu(&mut q).is_err());
         }
     }
 }

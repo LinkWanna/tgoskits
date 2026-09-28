@@ -285,7 +285,7 @@ impl<M: VbMemOps> VbPool<M> {
     pub fn streamon(&self) -> Result<(), V4l2Error> {
         let mut inner = self.state.lock();
         if inner.streaming {
-            return Err(V4l2Error::Busy);
+            return Ok(());
         }
         if inner.buffers.is_empty() {
             return Err(V4l2Error::InvalidArgument);

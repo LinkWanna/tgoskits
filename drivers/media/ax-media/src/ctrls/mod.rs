@@ -604,7 +604,8 @@ impl CtrlHandler {
 
         // 应用阶段（仅 S）：调用 try/s_ctrl 回调并更新当前值。
         if set {
-            for (c, &(ctrl, target)) in cs.iter_mut().zip(&resolved) {
+            for (index, (c, &(ctrl, target))) in cs.iter_mut().zip(&resolved).enumerate() {
+                h.error_idx = index as u32;
                 let new = self.apply_value(ctrl, target)?;
                 write_ext_value(c, ctrl.ctrl_type, new);
             }
@@ -1053,6 +1054,48 @@ mod tests {
             Err(V4l2Error::InvalidArgument)
         ));
         assert_eq!(h.error_idx, 2, "S mixed-class -> count");
+    }
+
+    #[test]
+    fn s_ext_ctrls_reports_the_hardware_failure_index() {
+        let mut handler = CtrlHandler::new();
+        handler
+            .new_int(BRIGHTNESS, "Brightness", 0, 255, 1, 0, None)
+            .unwrap();
+        handler
+            .new_int(
+                CONTRAST,
+                "Contrast",
+                0,
+                255,
+                1,
+                0,
+                Some(CtrlOps {
+                    get: None,
+                    try_ctrl: None,
+                    set: Box::new(|_| Err(V4l2Error::Io)),
+                }),
+            )
+            .unwrap();
+        let third = 0x0098_0902;
+        handler
+            .new_int(third, "Saturation", 0, 255, 1, 0, None)
+            .unwrap();
+
+        let mut cs = [
+            ext_ctrl(BRIGHTNESS, 10),
+            ext_ctrl(CONTRAST, 20),
+            ext_ctrl(third, 30),
+        ];
+        let mut h = ext_header(3, 0);
+        assert!(matches!(
+            handler.s_ext_ctrls(&mut h, &mut cs),
+            Err(V4l2Error::Io)
+        ));
+        assert_eq!(h.error_idx, 1);
+        assert_eq!(handler.value(BRIGHTNESS), Some(10));
+        assert_eq!(handler.value(CONTRAST), Some(0));
+        assert_eq!(handler.value(third), Some(0));
     }
 
     /// S_EXT_CTRLS：整数按步长取整；越界 clamp 到 [min, max]。
