@@ -188,7 +188,7 @@ impl<H: UvcHandle, M: VbMemOps + 'static> IoctlOps for UvcDevice<H, M> {
                         index -= count;
                         continue;
                     }
-                    let interval = intervals.get(index).copied().unwrap_or_else(|| {
+                    let interval = intervals.get(index).copied().unwrap_or({
                         if format.default_interval != 0 {
                             format.default_interval
                         } else {
