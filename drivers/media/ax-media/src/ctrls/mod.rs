@@ -203,6 +203,13 @@ impl CtrlHandler {
         }
     }
 
+    /// Restrict a registered control to the device's supported access modes.
+    pub fn restrict_access(&mut self, id: u32, flags: CtrlFlags) {
+        if let Some(ctrl) = self.ctrls.iter_mut().find(|c| c.id == (id & CTRL_ID_MASK)) {
+            ctrl.flags |= flags & (CtrlFlags::READ_ONLY | CtrlFlags::WRITE_ONLY);
+        }
+    }
+
     /// 已注册控件的数量。
     pub fn len(&self) -> usize {
         self.ctrls.len()
@@ -512,7 +519,8 @@ impl CtrlHandler {
             return Err(V4l2Error::AccessDenied);
         }
 
-        for (c, ctrl) in cs.iter_mut().zip(refs) {
+        for (index, (c, ctrl)) in cs.iter_mut().zip(refs).enumerate() {
+            h.error_idx = index as u32;
             let v = if is_default {
                 ctrl.default_value
             } else if is_min {
@@ -970,6 +978,36 @@ mod tests {
             Err(V4l2Error::InvalidArgument)
         ));
         assert_eq!(h.error_idx, 1, "s_ext_ctrls validation failure -> count");
+
+        let mut hardware = CtrlHandler::new();
+        for (id, get) in [
+            (BRIGHTNESS, Box::new(|| Ok(42i64)) as CtrlGetFn),
+            (CONTRAST, Box::new(|| Err(V4l2Error::Io)) as CtrlGetFn),
+        ] {
+            hardware
+                .new_int(
+                    id,
+                    "Hardware",
+                    0,
+                    255,
+                    1,
+                    0,
+                    Some(CtrlOps {
+                        get: Some(get),
+                        try_ctrl: None,
+                        set: Box::new(Ok),
+                    }),
+                )
+                .unwrap();
+        }
+        let mut cs = [ext_ctrl(BRIGHTNESS, 0), ext_ctrl(CONTRAST, 0)];
+        let mut h = ext_header(2, 0);
+        assert!(matches!(
+            hardware.g_ext_ctrls(&mut h, &mut cs),
+            Err(V4l2Error::Io)
+        ));
+        assert_eq!(read_value(&cs[0]), 42);
+        assert_eq!(h.error_idx, 1, "volatile read failure -> failing index");
     }
 
     #[test]

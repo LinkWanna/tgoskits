@@ -50,6 +50,19 @@ fn exposure_auto_index(raw: i64) -> Option<i64> {
         .map(|index| index as i64)
 }
 
+/// Representable range when a write-only control cannot report GET_MIN/MAX.
+fn uvc_wire_range(size: usize, signed: bool) -> Option<(i64, i64)> {
+    match (size, signed) {
+        (1, false) => Some((0, u8::MAX as i64)),
+        (1, true) => Some((i8::MIN as i64, i8::MAX as i64)),
+        (2, false) => Some((0, u16::MAX as i64)),
+        (2, true) => Some((i16::MIN as i64, i16::MAX as i64)),
+        (4, false) => Some((0, u32::MAX as i64)),
+        (4, true) => Some((i32::MIN as i64, i32::MAX as i64)),
+        _ => None,
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UvcCtrlType {
@@ -328,8 +341,10 @@ fn register_control<H: UvcHandle>(
         log::debug!("uvc: {log_tag} {name} disabled info={info_byte:#x}");
         return;
     }
-    if !caps.contains(ControlCapabilities::GET) {
-        log::debug!("uvc: {log_tag} {name} no GET support info={info_byte:#x}");
+    let readable = caps.contains(ControlCapabilities::GET);
+    let writable = caps.contains(ControlCapabilities::SET);
+    if !readable && !writable {
+        log::debug!("uvc: {log_tag} {name} no GET/SET support info={info_byte:#x}");
         return;
     }
 
@@ -406,25 +421,49 @@ fn register_control<H: UvcHandle>(
 
     let res = match ty {
         UvcCtrlType::Integer => {
-            let Some(min) = read(RequestCode::GetMin) else {
-                return;
+            let (min, max) = if readable {
+                let Some(min) = read(RequestCode::GetMin) else {
+                    return;
+                };
+                let Some(max) = read(RequestCode::GetMax) else {
+                    return;
+                };
+                (min, max)
+            } else {
+                let Some(range) = uvc_wire_range(size, signed) else {
+                    return;
+                };
+                range
             };
-            let Some(max) = read(RequestCode::GetMax) else {
-                return;
+            let step = if readable {
+                read(RequestCode::GetRes).unwrap_or(1).max(1)
+            } else {
+                1
             };
-            let step = read(RequestCode::GetRes).unwrap_or(1).max(1);
-            let default = read(RequestCode::GetDef).unwrap_or(min);
+            let default = if readable {
+                read(RequestCode::GetDef).unwrap_or(min)
+            } else {
+                0
+            };
             ctrls.new_int(cid_raw, name, min, max, step, default, Some(ops))
         }
         UvcCtrlType::Boolean => {
-            let default = read(RequestCode::GetDef).unwrap_or(0);
+            let default = if readable {
+                read(RequestCode::GetDef).unwrap_or(0)
+            } else {
+                0
+            };
             ctrls.new_bool(cid_raw, name, default != 0, Some(ops))
         }
         UvcCtrlType::Menu(qmenu) => {
             let (default_idx, skipped) = if cid_raw == CameraClassCtrl::ExposureAuto as u32 {
-                let supported = read(RequestCode::GetRes)
-                    .or_else(|| read(RequestCode::GetMax))
-                    .unwrap_or(0x0f);
+                let supported = if readable {
+                    read(RequestCode::GetRes)
+                        .or_else(|| read(RequestCode::GetMax))
+                        .unwrap_or(0x0f)
+                } else {
+                    0x0f
+                };
                 let skipped = EXPOSURE_AUTO_UVC_VALUES.iter().enumerate().fold(
                     0u64,
                     |mask, (index, mode)| {
@@ -440,14 +479,22 @@ fn register_control<H: UvcHandle>(
                 else {
                     return;
                 };
-                let default_idx = read(RequestCode::GetDef)
-                    .and_then(exposure_auto_index)
-                    .and_then(|index| u32::try_from(index).ok())
-                    .filter(|index| (skipped & (1u64 << index)) == 0)
-                    .unwrap_or(first_supported as u32);
+                let default_idx = if readable {
+                    read(RequestCode::GetDef)
+                        .and_then(exposure_auto_index)
+                        .and_then(|index| u32::try_from(index).ok())
+                        .filter(|index| (skipped & (1u64 << index)) == 0)
+                        .unwrap_or(first_supported as u32)
+                } else {
+                    first_supported as u32
+                };
                 (default_idx, skipped)
             } else {
-                let default = read(RequestCode::GetDef).unwrap_or(0);
+                let default = if readable {
+                    read(RequestCode::GetDef).unwrap_or(0)
+                } else {
+                    0
+                };
                 ((default as u32).min(qmenu.len() as u32 - 1), 0)
             };
             let res = ctrls.new_menu(
@@ -467,6 +514,15 @@ fn register_control<H: UvcHandle>(
     };
     if let Err(e) = res {
         log::warn!("uvc: skip {log_tag} {name} (0x{cid_raw:08x}): {e:?}");
+    } else {
+        let mut access = CtrlFlags::empty();
+        if !readable {
+            access.insert(CtrlFlags::WRITE_ONLY);
+        }
+        if !writable {
+            access.insert(CtrlFlags::READ_ONLY);
+        }
+        ctrls.restrict_access(cid_raw, access);
     }
 }
 
@@ -550,6 +606,7 @@ mod tests {
     struct ExposureHandle {
         current: AtomicU8,
         supported: u8,
+        caps: u8,
     }
 
     impl UvcHandle for ExposureHandle {
@@ -563,7 +620,7 @@ mod tests {
 
         fn control_in(&self, setup: ControlSetup, data: &mut [u8]) -> Result<usize, USBError> {
             data[0] = match setup.request {
-                crab_usb::usb_if::transfer::Request::Other(0x86) => 3,
+                crab_usb::usb_if::transfer::Request::Other(0x86) => self.caps,
                 crab_usb::usb_if::transfer::Request::Other(0x84) => self.supported,
                 crab_usb::usb_if::transfer::Request::Other(0x87) => 2,
                 crab_usb::usb_if::transfer::Request::Other(0x81) => {
@@ -600,6 +657,7 @@ mod tests {
         let handle = Arc::new(ExposureHandle {
             current: AtomicU8::new(2),
             supported: 0x0f,
+            caps: 3,
         });
         let mut ctrls = ax_media::CtrlHandler::new();
         register_control(
@@ -657,6 +715,7 @@ mod tests {
         let limited = Arc::new(ExposureHandle {
             current: AtomicU8::new(2),
             supported: 0x03,
+            caps: 3,
         });
         let mut ctrls = ax_media::CtrlHandler::new();
         register_control(
@@ -677,5 +736,68 @@ mod tests {
             };
             assert!(ctrls.querymenu(&mut q).is_err());
         }
+
+        for (caps, flag) in [(1, CtrlFlags::READ_ONLY), (2, CtrlFlags::WRITE_ONLY)] {
+            let handle = Arc::new(ExposureHandle {
+                current: AtomicU8::new(2),
+                supported: 0x0f,
+                caps,
+            });
+            let mut ctrls = ax_media::CtrlHandler::new();
+            register_control(
+                &mut ctrls,
+                &handle,
+                0,
+                1,
+                &[0x02],
+                &UVC_CONTROL_CT_DEFS[0],
+                "CT",
+            );
+            let mut access = QueryCtrl { id, ..query };
+            ctrls.queryctrl(&mut access).unwrap();
+            assert!(access.flags.contains(flag));
+            let mut control = Control { id, value: 1 };
+            if flag == CtrlFlags::READ_ONLY {
+                assert!(matches!(
+                    ctrls.s_ctrl(&mut control),
+                    Err(ax_media::V4l2Error::AccessDenied)
+                ));
+                assert_eq!(handle.current.load(Ordering::SeqCst), 2);
+            } else {
+                assert!(matches!(
+                    ctrls.g_ctrl(&mut control),
+                    Err(ax_media::V4l2Error::AccessDenied)
+                ));
+                ctrls.s_ctrl(&mut control).unwrap();
+                assert_eq!(handle.current.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn write_only_integer_control_remains_settable() {
+        let id = UserClassCtrl::Brightness as u32;
+        let handle = Arc::new(ExposureHandle {
+            current: AtomicU8::new(0),
+            supported: 0,
+            caps: 2,
+        });
+        let mut ctrls = ax_media::CtrlHandler::new();
+        register_control(
+            &mut ctrls,
+            &handle,
+            0,
+            2,
+            &[1],
+            &UVC_CONTROL_PU_DEFS[0],
+            "PU",
+        );
+        let mut control = Control { id, value: 42 };
+        assert!(matches!(
+            ctrls.g_ctrl(&mut control),
+            Err(ax_media::V4l2Error::AccessDenied)
+        ));
+        ctrls.s_ctrl(&mut control).unwrap();
+        assert_eq!(handle.current.load(Ordering::SeqCst), 42);
     }
 }

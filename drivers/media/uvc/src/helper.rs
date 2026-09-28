@@ -166,6 +166,7 @@ fn handle_vs_block(
                     (FrameUncompressed, VideoFormatType::Uncompressed(_))
                         | (FrameMjpeg, VideoFormatType::Mjpeg)
                 ) {
+                    cur_format = None;
                     consumed += len;
                     continue;
                 }
@@ -178,6 +179,7 @@ fn handle_vs_block(
                 debug!("VS StillImageFrame ignored");
             }
             FrameFrameBased | FrameH264 => {
+                cur_format = None;
                 debug!("VS unsupported frame {subtype:?} ignored");
             }
         }
@@ -702,6 +704,8 @@ mod tests {
             [11, 0x24, 0x06, 2, 1, 0, 0, 0, 0, 0, 0]
                 .into_iter()
                 .chain(mjpeg_frame)
+                .chain([4, 0x24, 0x14, 1])
+                .chain(stale_frame.clone())
                 .chain([4, 0x24, 0x13, 3])
                 .chain(stale_frame),
         );
